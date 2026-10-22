@@ -72,8 +72,10 @@
   intentionally omits dependencies of unused feed packages.
 - Copy `configs/tastek-mt76x8.config` to `.config`, run `make defconfig`, and perform
   a full firmware image build; a package-only compile is not a release build.
-  For the separate ECM30 RAM verification target, use `configs/ebyte-ecm30.config`
-  instead and retain the read-only 8192-byte page / 524288-byte eraseblock view.
+  For the separate ECM30 target, use `configs/ebyte-ecm30.config` instead.
+  Preserve the factory 8192-byte logical page / 524288-byte eraseblock view.
+  Keep boot0, U-Boot and secure storage write-protected; NAND installation and
+  upgrades operate on UBI volumes within sys and require verified readback.
   Do not run global `make clean` for routine source-only updates when the build
   checkout has a verified clean baseline. Use it only when the toolchain,
   target, seed configuration, or dependency baseline changed, or when stale

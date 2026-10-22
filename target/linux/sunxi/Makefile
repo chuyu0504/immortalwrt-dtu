@@ -5,8 +5,8 @@ include $(TOPDIR)/rules.mk
 
 ARCH:=arm
 BOARD:=sunxi
-BOARDNAME:=Ebyte T113-I ECM30 (RAM bring-up)
-FEATURES:=gpio nand ramdisk rtc usb
+BOARDNAME:=Ebyte T113-I ECM30
+FEATURES:=gpio nand ramdisk rtc usb squashfs
 SUBTARGETS:=cortexa7
 
 KERNEL_PATCHVER:=6.12
@@ -17,8 +17,8 @@ include $(INCLUDE_DIR)/target.mk
 DEFAULT_PACKAGES += kmod-gpio-button-hotplug
 
 define Target/Description
-  Experimental RAM-only firmware for the Ebyte T113-I ECM30.
-  Includes a read-only compatibility view of the vendor paired-block NAND.
+  NAND firmware and RAM recovery for the Ebyte T113-I ECM30.
+  Retains the vendor's paired-page 8 KiB / 512 KiB NAND layout.
 endef
 
 $(eval $(call BuildTarget))

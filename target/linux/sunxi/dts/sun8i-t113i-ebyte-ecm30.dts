@@ -9,7 +9,7 @@
 #include <dt-bindings/input/input.h>
 
 / {
-	model = "Ebyte T113-I ECM30 (experimental RAM bring-up)";
+	model = "Ebyte T113-I ECM30";
 	compatible = "ebyte,ecm30", "allwinner,sun8i-t113s";
 
 	aliases {
@@ -26,7 +26,7 @@
 	chosen {
 		stdout-path = "serial0:115200n8";
 		/* Keep early UART output within the external watchdog boot window. */
-		bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 loglevel=3";
+		bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 ubi.mtd=sys,4096 ubi.block=0,rootfs root=/dev/ubiblock0_5 rootfstype=squashfs ro rootwait loglevel=3";
 	};
 
 	memory@40000000 {
@@ -231,14 +231,14 @@
 	status = "okay";
 };
 
-/* Native NAND stays private; the driver registers a read-only AW logical view. */
+/* Native NAND stays private; expose the factory 8 KiB / 512 KiB layout. */
 &spi0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi0_pins>;
 	status = "okay";
 
 	nand0: nand@0 {
-		compatible = "ebyte,ecm30-aw-spinand-ro", "spi-nand";
+		compatible = "ebyte,ecm30-aw-spinand", "spi-nand";
 		reg = <0>;
 		spi-max-frequency = <20000000>;
 		spi-rx-bus-width = <1>;
@@ -247,4 +247,4 @@
 	};
 };
 
-/* MMC2 remains disabled; no writable storage or flash image is enabled. */
+/* MMC2 remains disabled; the system boots from SPI NAND. */

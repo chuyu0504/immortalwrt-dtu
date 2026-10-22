@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Package a verified ECM30 initramfs uImage as an Android v2 boot image.
+"""Package an ECM30 uImage as a factory-compatible Android v2 boot image.
 
 This only creates local files. It never opens a device or flashes firmware.
 The boot volume is 33 UBI LEBs of 516096 bytes on the tested factory layout.
@@ -61,8 +61,15 @@ def unpack_uimage(data, dtb):
     return payload
 
 
-def build_image(uimage, dtb):
+def build_image(uimage, dtb, rootfs="initramfs"):
     kernel = unpack_uimage(uimage, dtb)
+    cmdline = CMDLINE if rootfs == "initramfs" else (
+        "console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 "
+        "ubi.mtd=sys,4096 ubi.block=0,rootfs root=/dev/ubiblock0_5 "
+        "rootfstype=squashfs ro rootwait loglevel=3")
+    if rootfs == "squashfs":
+        require(cmdline.encode() + b"\0" in dtb,
+                "NAND DTB must contain the matching SquashFS boot arguments")
     digest = hashlib.sha1()
     # Android v2 hashes kernel, ramdisk, second, recovery_dtbo and DTB in order.
     for component in (kernel, b"", b"", b"", dtb):
@@ -71,7 +78,7 @@ def build_image(uimage, dtb):
     header = ANDROID_V2.pack(
         b"ANDROID!", len(kernel), KERNEL_ADDRESS, 0, 0, 0, 0,
         0x40000100, PAGE_SIZE, 2, 0,
-        b"sun8i_arm", CMDLINE.encode(), digest.digest().ljust(32, b"\0"), b"",
+        b"sun8i_arm", cmdline.encode(), digest.digest().ljust(32, b"\0"), b"",
         0, 0, ANDROID_V2.size, len(dtb), DTB_ADDRESS)
     image = padded(header) + padded(kernel) + padded(dtb)
     require(len(image) <= BOOT_VOLUME_BYTES, "image exceeds the factory boot volume")
@@ -93,9 +100,10 @@ def build_image(uimage, dtb):
         "dtb_sha256": hashlib.sha256(dtb).hexdigest(),
         "dtb_file_offset": PAGE_SIZE + len(padded(kernel)),
         "dtb_address": hex(DTB_ADDRESS),
-        "cmdline": CMDLINE,
+        "cmdline": cmdline,
         "factory_boot_volume_bytes": BOOT_VOLUME_BYTES,
-        "rootfs": "builtin initramfs; configuration is volatile",
+        "rootfs": ("builtin initramfs; configuration is volatile" if rootfs == "initramfs"
+                   else "UBI rootfs SquashFS plus UBIFS rootfs_data overlay"),
         "flash_performed": False,
     }
     return image, report
@@ -107,10 +115,11 @@ def main():
     parser.add_argument("--dtb", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--rootfs", choices=("initramfs", "squashfs"), default="initramfs")
     args = parser.parse_args()
     require(not args.output.exists() and not args.report.exists(),
             "refusing to overwrite an existing output or report")
-    image, report = build_image(args.uimage.read_bytes(), args.dtb.read_bytes())
+    image, report = build_image(args.uimage.read_bytes(), args.dtb.read_bytes(), args.rootfs)
     with args.output.open("xb") as stream:
         stream.write(image)
     with args.report.open("x", encoding="utf-8") as stream:

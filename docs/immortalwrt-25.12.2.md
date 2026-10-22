@@ -206,3 +206,25 @@ rootfs_data 作为可写上层。需要补齐 UBI block 支持和经过验证的
 长期联网及稳定性、吞吐压力，以及 RS485/串口、CAN、DI/DO 等工业接口验证
 随后按用途安排。原厂 auto_test 作为接线和行为参考，不直接运行会切换网络
 或输出状态的脚本。
+
+## 2026-10-22 分离布局适配进行中
+
+用户随后将范围调整为直接分离内核、rootfs 和 rootfs_data，并要求一套完整的
+原厂兼容 NAND 驱动，不区分只读、可写模式。临时 Android initramfs 镜像已成功
+RAM 启动；内核仍为 9059f835c6，4G 公网 ping 3/3、DNS、eth1 HTTP 和看门狗
+运行正常，但没有把该临时镜像写入 NAND。
+
+新驱动保留同页双块拼接、16+16 字节受保护 OOB 和原厂坏块判定；写入拆成
+4 KiB 物理页，擦除拆成相邻的两个 256 KiB 块。只注册逻辑 MTD，并在分区及
+回调两层限制前 10 MiB 的写入。16 项 KUnit 测试通过，包括短写、半途失败、
+跨块、4 KiB 子页、OOB、擦除及坏块标记。尚未完成新写路径的实机验证。
+
+拟采用固定 UBI 卷：boot 保留卷号 4、33 个 LEB；rootfs 保留卷号 5、使用
+64 个 LEB（33030144 字节）保存 SquashFS；新增卷号 8 的 rootfs_data，
+保存 UBIFS 上层。mbr、boot-resource、env、env-redund、private、UDISK 保留。
+内核启用 UBI block，坏块预算使用 40/1024，与原厂 39 个可用坏块预留一致。
+
+sysupgrade 接受带设备元数据的 ECM30 tar，检查 Android 内核、SquashFS、容量
+和当前卷布局；更新 rootfs 与 boot 后分别回读校验，再重建 rootfs_data 并
+恢复标准配置备份。拒绝裸 UBI 镜像，也不调用整个 sys 的 ubiformat。
+10 项升级脚本测试通过，实际刷写、断电配置保持及保留配置升级仍待验证。
