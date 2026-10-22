@@ -45,8 +45,8 @@ ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用r
 保持8 KiB逻辑页、512 KiB逻辑块和NAND写入拒绝；完整构建后重新验证4G和双网口。
 
 此前 ECM30 文档中的 6.18 硬件测试属于历史证据，不能视为 6.12 已通过实机
-验证。完整固件、最终 rootfs、ELF 依赖、镜像大小与 SHA-256 仍需在正式构建后
-验证。此次迁移不授权刷机或更换密钥。
+验证。ECM30 的完整构建及离线产物检查已完成，结果见下节；TAS 联合发布
+构建和 ECM30 的 6.12 实机验证仍待完成。此次迁移不授权刷机或更换密钥。
 
 ## 2026-10-22 本地验证结果
 
@@ -61,6 +61,72 @@ ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用r
   保留官方 linux-firmware 包定义、预置 libuv 源码入口用于解析未选中驱动的
   依赖；没有因此在设备配置中启用这些固件或 libuv。
 
-日志保存在迁移工作区的 `build_dir/migration-validation/`。构建机
-`10.10.0.101` 当时对 root 和 openwrtbuild 的 SSH 连接均直接关闭，未执行
-完整发布构建或设备刷写。正式发布前仍须补齐上节的产物与实机验证。
+日志保存在迁移工作区的 `build_dir/migration-validation/`。最初尝试连接的
+`10.10.0.101` 不可用；随后按用户更正的 `10.10.0.100` 完成下述 ECM30 构建。
+
+## 2026-10-22 ECM30 完整构建及离线检查
+
+构建源码为 `c8e7bf5e2cfd9d2316c6ee45c62b790a7e9569e5`，固件报告
+`ImmortalWrt 25.12.2 r38146-c8e7bf5e2c`，内核为 `6.12.103`。
+构建机从干净工作树拉取已推送提交，按上述固定 feeds 和 ECM30 seed 构建。
+首次切换基线执行 `make dirclean`，重建 GCC 14.3.0、binutils 2.44 和 musl
+工具链；后续修正仅清理相应包，再完成全量镜像构建。
+
+构建中修正了两个发布版兼容问题：PPP 2.5.2 的包补丁移除针对不存在的
+`dhcpv6relay/Makefile.am` 的修改，保留插件安装规则；移除上游源码归档遗留的
+静态 `version`、`version.date`，使固件 revision 来自实际 Git 提交。
+最终完整构建退出状态为 0，PPP 2.5.2-r5 的 `pppoe.so` 已进入 rootfs。
+
+产物位于本地忽略目录 `artifacts/ebyte-t113i/ram-c8e7bf5e2c/`；完整归档为
+`artifacts/ebyte-t113i/ecm30-release-c8e7bf5e2c.tar.gz`。
+
+| 产物 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `ecm30.uImage` | 9223372 | `fcdcff350a993fd04f7ee68abe889693ea6c96b3aceca3059491e22f46101156` |
+| `ecm30.dtb` | 19452 | `0a854c5a22b2bf1642570a61992a57ecdaf2ed721affdb126bad781121468047` |
+| `immortalwrt-sunxi-cortexa7-ebyte_ecm30-rootfs.tar.gz` | 5026307 | `0aedb4b2a83965c4c9597ba83acb53a4e4f3ea7c803ea461802938527a4bafa0` |
+
+完整归档 SHA-256：
+`5e138f317531cad52c53017d5bba34bd13ff4566e6c5b38295c5167736712a4d`。
+归档内 18 个文件的 SHA-256 全部通过；镜像、manifest、seed、最终构建配置、
+内核配置、feeds 版本、源码提交、构建日志及校验表一起保存。
+
+已拆解最终 rootfs 和 initramfs，并检查：
+
+- uImage 头及数据 CRC、独立 DTB 与附加 DTB 一致；加载和入口地址均为
+  `0x43000000`，解压后内核末端 `0x41425b30` 低于 OP-TEE 起点 `0x41900000`。
+- initramfs 含 1017 个条目，185 个 ARM ELF 的依赖均可解析；选中
+  EdgeNode 0.3.70-r1、Telnet 客户端和服务端、tcpdump-mini、LuCI、UBI 工具。
+- 最终镜像保留 ECM30 PHY 时钟及复位补丁、CH397 自定义 MAC 接收修正、
+  `eth0 eth1` 的 LAN 桥接及 `usb0` 的 4G DHCP 配置。
+- 防火墙保持 LAN 可管理、WAN 输入拒绝及 LAN 到 WAN 转发规则；4G 配置权限
+  为 0600，没有发现内嵌私钥。未更换密钥或改变证书策略。
+- NAND 仍为 8192 字节逻辑页、524288 字节逻辑擦除块；保留写使能拦截、
+  写入拒绝和禁用刷写的升级入口。
+
+检查结果见同目录的 `verification.json`、`preflight-output.json` 和
+`release-sha256sums.txt`。
+
+## 实机验证状态：等待串口恢复
+
+准备 RAM 启动时，Windows 已无法枚举调试串口，用户确认暂时无法重新连接。
+因此未执行这次 25.12.2 的 RAM 启动，也未重启或刷写板子。新内核的 4G
+自动拨号、公网访问、两个网口收发、自定义桥接 MAC 和 NAND 只读数据对照
+均仍待实测，不能使用上节离线检查代替。
+
+构建期间在仍运行的旧 `6.18.44` RAM 系统完成了一次 NAND 只读基线复核：
+sys 分区 1004 个逻辑擦除块，仅块 235 标记为坏块；10 组块首、块尾样本
+均与原厂基线相符；MTD flags 为 0，UBI `ro_mode=1`，原厂 UBIFS 只读挂载可读。
+boot 卷完整 SHA-256 为
+`de32431458cd6f33f51d1b6c835f71be7d2a83a88ba928c9840b2abc3ebaded5`，
+rootfs 首 4096 字节 SHA-256 为
+`e82fd0713670de18a5f0e5db4a38f9863b0ca21ed312c1213955a1c3ab4851a3`。
+日志位于 `artifacts/ebyte-t113i/25.12.2-prebuild/`。验证后已卸载 UBIFS 并
+分离 UBI；这些结论仅对应旧内核。
+
+准备验证新固件自动拨号时，旧 RAM 系统的 `4ginfo` 服务已停止，并执行临时
+`AT+QNETDEVCTL=0` 断开数据连接。串口随后不可用，LAN 管理接口也未能登录，
+因此尚未恢复 4G。可通过已有管理凭据在 LuCI「系统 → 启动项」启动
+`4ginfo`，或在控制台执行 `/etc/init.d/4ginfo start`。
+串口恢复后，先确认当前系统状态，再用已校验产物执行 RAM 启动和实测；
+保持 NAND 只读，不执行 erase、write、saveenv 或 sysupgrade。
