@@ -1,5 +1,10 @@
 # ImmortalWrt 25.12.2 基线迁移
 
+ECM30 当前已安装 `25.12.2 r38159-6ddc3d5f35 / Linux 6.12.103`，从 NAND
+自动启动。原厂 8 KiB / 512 KiB 布局、单一读写驱动、SquashFS＋UBIFS
+OverlayFS、重启配置保持及保留配置 sysupgrade 已实机通过。最终产物和
+验证范围见本文末尾；中间的只读与 RAM 记录保留为适配历史。
+
 ## 固定来源
 
 - 固件基线：官方 `v25.12.2`，提交 `4fc16f2985a358bd43bb522e43f05395fcbd6ed5`。
@@ -23,9 +28,10 @@ TAS-682F、IT-694_s3、EdgeNode 0.3.70、LuCI 应用、网络看门狗和既有�
 均保留。没有更改应用协议、平台配置、升级传输、证书策略和内嵌密钥。
 HTTP/WS、HTTPS/WSS、多平台隔离、远程终端及网络恢复仍沿用现有实现。
 
-ECM30 继续只生成 RAM 启动产物。NAND 补丁适配 6.12 的 SPI-NAND API，
-保持独立逻辑视图、芯片 ID 限制、WRITE ENABLE 拦截、硬件块保护和写入拒绝；
-不提供刷写镜像。PHY 时钟、复位次序及 CH397 过滤补丁移至 `patches-6.12`。
+ECM30 生成 NAND sysupgrade、Android boot 和 RAM 恢复产物。NAND 补丁适配
+6.12 的 SPI-NAND API，保留原厂页/块映射、芯片 ID 限制及私有物理后端，
+仅允许 sys 范围内的写入，保护前 10 MiB 的启动和安全存储分区。
+PHY 时钟、复位次序及 CH397 过滤补丁移至 `patches-6.12`。
 NAND 测试脚本从目标的内核版本文件读取版本及校验值。
 
 发布版 libwebsockets 为 4.4.1；继续启用 libev、zlib、permessage-deflate，
@@ -41,8 +47,8 @@ NAND 测试脚本从目标的内核版本文件读取版本及校验值。
 基线，首次正式构建需要清理旧输出；不可复用 6.18 的编译结果。
 按照 AGENTS.md 更新固定 feeds、运行 `scripts/install-tas-feeds.sh`，复制
 `configs/tastek-mt76x8.config` 后执行 `make defconfig` 和完整固件构建。
-ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用rootfs产物，
-保持8 KiB逻辑页、512 KiB逻辑块和NAND写入拒绝；完整构建后重新验证4G和双网口。
+ECM30 单独使用 `configs/ebyte-ecm30.config`，生成分离的内核、SquashFS、
+标准 sysupgrade tar 及 RAM 恢复镜像，保持 8 KiB 逻辑页、512 KiB 逻辑块。
 
 此前 ECM30 文档中的 6.18 硬件测试属于历史证据，不能视为 6.12 已通过实机
 验证。ECM30 的完整构建、离线产物检查和本轮 RAM 功能验证已完成，结果见下节；
@@ -158,15 +164,16 @@ rootfs 首 4096 字节 SHA-256 为
 分离 UBI；这些结论仅对应旧内核。
 
 串口断开前临时停止旧 RAM 系统 4G 的状态已由本轮新系统联网及重拨测试解决。
-所有自定义内核的 NAND 测试保持只读，没有执行 erase、write、saveenv 或
-sysupgrade。当前产物只用于 RAM 验证，NAND 驱动仍不提供写入能力。
+截至上述 RAM 阶段的 NAND 测试保持只读，没有执行 erase、write、saveenv 或
+sysupgrade。后续经用户授权实现读写并完成安装，见末尾的分离布局记录。
 
 ## NAND 启动镜像准备
 
 已只读备份原厂 boot 卷到电脑，大小 17031168 字节，完整 SHA-256 为
 `de32431458cd6f33f51d1b6c835f71be7d2a83a88ba928c9840b2abc3ebaded5`，
 保存在 `artifacts/ebyte-t113i/nand-boot-9059f835c6/boot-original.bin`。
-启动及安全存储分区不在本次更新范围内；原厂 Ubuntu rootfs 保留，可用于恢复。
+启动及安全存储分区不在更新范围内；后续分离安装替换了原厂 Ubuntu rootfs，
+其完整备份已保存到电脑，可用于恢复。
 
 `scripts/mk-ecm30-bootimg.py` 检查 uImage 头/数据 CRC、ARM zImage 边界、
 ECM30 DTB 及容量限制，再生成适配原厂 U-Boot 的 Android v2 镜像及 JSON
@@ -189,7 +196,7 @@ ECM30 DTB 及容量限制，再生成适配原厂 U-Boot 的 Android v2 镜像�
 该环境修改仅保留在 RAM，不保存环境。先完成此项验证，再使用原厂驱动
 更新 boot 卷；原厂 Ubuntu 中已确认存在 ubiupdatevol 和 Python 3。
 
-## 后续顺序：先从 NAND 自动启动
+## 安装范围决策（历史）
 
 用户在本轮 RAM 验证后明确要求优先实际落盘，并选择「先从 NAND 自动启动
 ImmortalWrt，配置持久化随后做」。下一阶段先备份原厂 boot 卷，对照原厂
@@ -207,7 +214,7 @@ rootfs_data 作为可写上层。需要补齐 UBI block 支持和经过验证的
 随后按用途安排。原厂 auto_test 作为接线和行为参考，不直接运行会切换网络
 或输出状态的脚本。
 
-## 2026-10-22 分离布局适配进行中
+## 2026-10-22 分离布局实机通过
 
 用户随后将范围调整为直接分离内核、rootfs 和 rootfs_data，并要求一套完整的
 原厂兼容 NAND 驱动，不区分只读、可写模式。临时 Android initramfs 镜像已成功
@@ -217,9 +224,10 @@ RAM 启动；内核仍为 9059f835c6，4G 公网 ping 3/3、DNS、eth1 HTTP 和�
 新驱动保留同页双块拼接、16+16 字节受保护 OOB 和原厂坏块判定；写入拆成
 4 KiB 物理页，擦除拆成相邻的两个 256 KiB 块。只注册逻辑 MTD，并在分区及
 回调两层限制前 10 MiB 的写入。16 项 KUnit 测试通过，包括短写、半途失败、
-跨块、4 KiB 子页、OOB、擦除及坏块标记。尚未完成新写路径的实机验证。
+跨块、4 KiB 子页、OOB、擦除及坏块标记。ARM 完整构建过程中还修正了擦除
+边界检查的运行时 64 位除法，避免链接到内核不提供的 `__aeabi_uldivmod`。
 
-拟采用固定 UBI 卷：boot 保留卷号 4、33 个 LEB；rootfs 保留卷号 5、使用
+采用固定 UBI 卷：boot 保留卷号 4、33 个 LEB；rootfs 保留卷号 5、使用
 64 个 LEB（33030144 字节）保存 SquashFS；新增卷号 8 的 rootfs_data，
 保存 UBIFS 上层。mbr、boot-resource、env、env-redund、private、UDISK 保留。
 内核启用 UBI block，坏块预算使用 40/1024，与原厂 39 个可用坏块预留一致。
@@ -227,4 +235,60 @@ RAM 启动；内核仍为 9059f835c6，4G 公网 ping 3/3、DNS、eth1 HTTP 和�
 sysupgrade 接受带设备元数据的 ECM30 tar，检查 Android 内核、SquashFS、容量
 和当前卷布局；更新 rootfs 与 boot 后分别回读校验，再重建 rootfs_data 并
 恢复标准配置备份。拒绝裸 UBI 镜像，也不调用整个 sys 的 ubiformat。
-10 项升级脚本测试通过，实际刷写、断电配置保持及保留配置升级仍待验证。
+10 项升级脚本测试通过。写入复用标准 `nand_upgrade_tar()`，板级准备函数
+只检查既有布局并解除 ubiblock，避免通用的整片格式化回退。
+
+最终源码为 `6ddc3d5f35b15dcc2bb3f658d92295d1446fde41`，完整构建退出 0。
+后续 `bf7fe54549` 仅修正首次安装辅助脚本对 OpenWrt 可选 shell 变量的处理，
+不改变已测试固件字节。RAM 恢复内核与 NAND 内核分别检查了 ELF 和 DTB；
+正式内核只有 512 字节的空 initramfs，完整系统位于独立 SquashFS。
+SquashFS 解包后的 670 个普通文件与 rootfs 归档一致，185 个 ELF 依赖通过。
+
+### 最终布局
+
+| UBI 卷 | 卷号 | LEB 数 | 容量 | 用途 |
+| --- | ---: | ---: | ---: | --- |
+| boot | 4 | 33 | 17031168 字节 | Android v2 内核与设备树 |
+| rootfs | 5 | 64 | 33030144 字节 | SquashFS 只读下层 |
+| rootfs_data | 8 | 856 | 441778176 字节 | UBIFS 可写上层 |
+
+运行时 `/rom` 为 SquashFS，`/overlay` 为 UBIFS，`/` 为 OverlayFS。
+UBIFS 报告约 387.9 MiB 文件系统容量，初始可用约 383.2 MiB；差额为文件系统
+开销及预留，并非布局丢失。UBI 仍有 1003 个好块、1 个原有坏块，预留 39 个
+坏块处理 PEB。
+
+### 实机验证
+
+- 原厂 boot 完整备份 17031168 字节，原厂 rootfs 完整备份 474808320 字节；
+  后者 SHA-256 为 `d61d4d42c8705fc68d5a1fdd6e10fbc0a53556b61148e732b3b61ad446ea1cf9`，
+  电脑副本与板端重新读取一致。其他小卷及启动分区哈希也已保存。
+- 在 UDISK 空卷写入 516096 字节随机数据并回读一致，恢复原来的全 FF 内容；
+  boot0、U-Boot、安全存储、环境、mbr、private 等保留区哈希一致。
+- 首次安装由已验证的新 RAM 内核完成；内核和 rootfs 分别回读 SHA-256。
+  SquashFS 挂载、UBIFS 写入/卸载/重新挂载通过，然后正常重启从 NAND 启动。
+- 在 `/etc/config` 创建测试配置，普通重启后值仍在；随后对同一固件执行标准
+  `sysupgrade` 保留配置升级。日志出现 `configuration saved` 和
+  `sysupgrade successful`，重启后配置值再次核对通过，测试文件已清理。
+- 升级后内核、rootfs 再次回读一致；全部保留区再次核对一致。双核在线，
+  看门狗运行；4G 公网 ping 3/3、DNS、电脑网口 ping 4/4 和 HTTP 200 通过。
+  当前接线口为 eth0；eth1 保留此前同驱动的 RAM 实测结果。
+
+上述重启均为软件重启，未据此声称完成断电循环、长时间稳定性或吞吐压力测试。
+原厂 U-Boot 仍打印其旧设备树接口及内存保留区告警，Linux 启动和联网不受本轮
+测试中这些告警影响；本轮未修改 U-Boot，也不把 U-Boot 的网络下载作为已验证
+功能。串口 RAM 恢复入口已保留。
+
+### 产物
+
+位于本地忽略目录 `artifacts/ebyte-t113i/nand-6ddc3d5f35/`：
+
+| 文件 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| `boot.img` | 4249600 | `8a0401147adf66efccb587631008f028aded75c71376008128f2d1ff54873bbe` |
+| `rootfs.squashfs` | 3853312 | `1c557174dd9263b0303ad4c4484e1a9eebbf7162b63beb22602db4936e5920ec` |
+| `immortalwrt-sunxi-cortexa7-ebyte_ecm30-squashfs-sysupgrade.bin` | 8110344 | `00161df82bbf3a4da17b32183f9139aa9981c6595a02111fb20a22ac9ad21370` |
+| `ecm30.uImage`（RAM 恢复） | 9236532 | `3b03403292174d3bd5446676e045ac682275d7c9305afaee6b288c2dd9cd35f6` |
+
+首次安装脚本为 `scripts/ecm30-install-nand.sh`，默认要求显式选择检查或安装，
+只接受备份对应的原厂布局。已安装设备后续使用上表的 sysupgrade 文件，
+不要把它作为整个 NAND 的原始镜像或 PhoenixSuit 镜像使用。

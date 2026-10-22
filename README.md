@@ -8,8 +8,10 @@ The official packages and LuCI feeds are pinned to the exact revisions shipped
 with that release. Do not update this tree from master.
 
 The TAS-682F / IT-694_s3 release seed is `configs/tastek-mt76x8.config`.
-The independent ECM30 RAM-only seed is `configs/ebyte-ecm30.config`; its earlier
-Linux 6.18 hardware test results do not establish Linux 6.12 hardware support.
+The independent ECM30 seed is `configs/ebyte-ecm30.config`. Linux 6.12 NAND boot,
+the factory 8 KiB / 512 KiB geometry, SquashFS with a UBIFS overlay, and
+configuration-preserving sysupgrade have been verified on hardware. A RAM
+recovery image is built alongside the NAND firmware.
 See [the migration notes](docs/immortalwrt-25.12.2.md) and [AGENTS.md](AGENTS.md)
 for the release workflow.
 
