@@ -20,8 +20,8 @@ done
 
 [ "$(sha256sum "$image" | cut -d ' ' -f 1)" = "$image_sha" ]
 platform_check_image "$image"
-ecm30_check_factory_layout
+ecm30_check_install_layout
 [ "$(sha256sum /dev/ubi0_4 | cut -d ' ' -f 1)" = "$boot_sha" ]
-echo "ECM30_INSTALL_CHECK_OK: boot 33 LEBs, rootfs 64 LEBs, rootfs_data uses remaining space"
+echo "ECM30_INSTALL_CHECK_OK: boot 33 LEBs, rootfs 32 LEBs, rootfs_data uses remaining space"
 [ "$mode" = --install ] || exit 0
 exec sysupgrade -n "$image"

@@ -125,7 +125,7 @@ nand_do_upgrade_success() { echo success >> "$LOG"; }
         self.assertEqual(self.log.read_text().splitlines(),
                          ['unblock ubi0_5', 'write ubi0_5', 'write ubi0_4'])
 
-    def fixture(self, installed=False):
+    def fixture(self, installed=False, root_lebs=None):
         def write(name, value):
             path = self.sys / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,8 +137,10 @@ nand_do_upgrade_success() { echo success >> "$LOG"; }
             write('class/mtd/mtd3/' + key, value)
         for key, value in {'ro_mode': 0, 'volumes_count': 9 if installed else 8}.items():
             write('class/ubi/ubi0/' + key, value)
+        if root_lebs is None:
+            root_lebs = 32 if installed else 920
         volumes = [('mbr', 1), ('boot-resource', 1), ('env', 1), ('env-redund', 1),
-                   ('boot', 33), ('rootfs', 64 if installed else 920), ('private', 2), ('UDISK', 1)]
+                   ('boot', 33), ('rootfs', root_lebs), ('private', 2), ('UDISK', 1)]
         if installed:
             volumes.append(('rootfs_data', 856))
         for n, (name, count) in enumerate(volumes):
@@ -231,7 +233,7 @@ ubimkvol() {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.log.read_text().splitlines(), [
             'unblock ubi0_5', 'remove /dev/ubi0 -N rootfs',
-            'create /dev/ubi0 -n 5 -N rootfs -s 33030144',
+            'create /dev/ubi0 -n 5 -N rootfs -s 16515072',
             'create /dev/ubi0 -n 8 -N rootfs_data -m', 'unblock ubi0_5'])
 
     def test_factory_prepare_failure_stops_without_formatting(self):
@@ -245,7 +247,40 @@ ubiformat() { echo FORBIDDEN >> "$LOG"; }
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.log.read_text().splitlines(), [
             'unblock ubi0_5', 'remove /dev/ubi0 -N rootfs',
-            'create /dev/ubi0 -n 5 -N rootfs -s 33030144'])
+            'create /dev/ubi0 -n 5 -N rootfs -s 16515072'])
+
+    def test_previous_64_block_layout_is_supported_in_ram(self):
+        self.fixture(installed=True, root_lebs=64)
+        result = self.run_shell('platform_check_image "$IMAGE"', self.layout_setup())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_previous_layout_cannot_shrink_while_running_from_nand(self):
+        self.fixture(installed=True, root_lebs=64)
+        result = self.run_shell('platform_check_image "$IMAGE"', self.layout_setup('rootfs_type() { echo overlay; }'))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_previous_layout_refuses_mounted_overlay(self):
+        self.fixture(installed=True, root_lebs=64)
+        self.mounts.write_text('/dev/ubi0_8 /overlay ubifs rw 0 0\n')
+        result = self.run_shell('platform_check_image "$IMAGE"', self.layout_setup())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_shrinking_previous_layout_keeps_other_volumes(self):
+        self.fixture(installed=True, root_lebs=64)
+        setup = self.layout_setup('ecm30_check_layout() { [ -f "$TEST_SYS/ready" ]; }')
+        result = self.run_shell('nand_upgrade_prepare_ubi 512 squashfs 4096', setup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines(), [
+            'unblock ubi0_5', 'remove /dev/ubi0 -N rootfs',
+            'remove /dev/ubi0 -N rootfs_data',
+            'create /dev/ubi0 -n 5 -N rootfs -s 16515072',
+            'create /dev/ubi0 -n 8 -N rootfs_data -m', 'unblock ubi0_5'])
+
+    def test_other_rootfs_allocation_is_rejected(self):
+        self.fixture(installed=True, root_lebs=48)
+        result = self.run_shell('platform_check_image "$IMAGE"', self.layout_setup())
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == '__main__':
