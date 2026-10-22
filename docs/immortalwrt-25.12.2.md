@@ -161,6 +161,29 @@ rootfs 首 4096 字节 SHA-256 为
 所有自定义内核的 NAND 测试保持只读，没有执行 erase、write、saveenv 或
 sysupgrade。当前产物只用于 RAM 验证，NAND 驱动仍不提供写入能力。
 
+## NAND 启动镜像准备
+
+已只读备份原厂 boot 卷到电脑，大小 17031168 字节，完整 SHA-256 为
+`de32431458cd6f33f51d1b6c835f71be7d2a83a88ba928c9840b2abc3ebaded5`，
+保存在 `artifacts/ebyte-t113i/nand-boot-9059f835c6/boot-original.bin`。
+启动及安全存储分区不在本次更新范围内；原厂 Ubuntu rootfs 保留，可用于恢复。
+
+`scripts/mk-ecm30-bootimg.py` 检查 uImage 头/数据 CRC、ARM zImage 边界、
+ECM30 DTB 及容量限制，再生成适配原厂 U-Boot 的 Android v2 镜像及 JSON
+校验报告。仅生成本地文件，不包含刷写操作。内核仍为已通过实机验证的
+`9059f835c6`，加载地址 0x43000000；Android 封装采用 2048 字节对齐，
+这是镜像格式的对齐，与 NAND 的 8192 字节逻辑页分别处理。
+
+输出已与 AOSP android-11.0.0_r1 的 mkbootimg 做逐字节比对，完全一致，
+并验证损坏 uImage 和无效 DTB 会被拒绝。镜像大小为 9236480 字节，SHA-256
+为 `bdc1810c4beee69d70ea99968dc64ac3333b4b2f3cb76106a238b9d6909d6959`。
+该文件是 boot 卷的内容，不是整个 NAND 或 sys 分区的原始镜像。
+
+对照 SDK 的 U-Boot 源码发现，Android v2 路径会从 boot 卷重读 DTB，RAM
+测试须使用临时的不存在分区名来避免读取原厂 DTB，再执行同格式启动。
+该环境修改仅保留在 RAM，不保存环境。先完成此项验证，再使用原厂驱动
+更新 boot 卷；原厂 Ubuntu 中已确认存在 ubiupdatevol 和 Python 3。
+
 ## 后续顺序：先从 NAND 自动启动
 
 用户在本轮 RAM 验证后明确要求优先实际落盘，并选择「先从 NAND 自动启动
