@@ -26,9 +26,9 @@ printf '%s  %s\n' "$SHA256" "$ARCHIVE" | sha256sum -c -
 if [ ! -d "$SOURCE" ]; then
 	mkdir "$SOURCE"
 	tar -xJf "$ARCHIVE" -C "$SOURCE" --strip-components=1
-	patch -d "$SOURCE" -p1 < "target/linux/sunxi/patches-$KERNEL_SERIES/300-mtd-spinand-ecm30-aw-readonly-view.patch"
-	cp target/linux/sunxi/files/drivers/mtd/nand/spi/aw-compat-ro*.c "$SOURCE/drivers/mtd/nand/spi/"
-	cp target/linux/sunxi/files/drivers/mtd/nand/spi/aw-compat-ro.h "$SOURCE/drivers/mtd/nand/spi/"
+	patch -d "$SOURCE" -p1 < "target/linux/sunxi/patches-$KERNEL_SERIES/300-mtd-spinand-ecm30-aw-view.patch"
+	cp target/linux/sunxi/files/drivers/mtd/nand/spi/aw-compat*.c "$SOURCE/drivers/mtd/nand/spi/"
+	cp target/linux/sunxi/files/drivers/mtd/nand/spi/aw-compat.h "$SOURCE/drivers/mtd/nand/spi/"
 	touch "$SOURCE/.ecm30-patched"
 fi
 [ -f "$SOURCE/.ecm30-patched" ] || { echo 'Incomplete KUnit source preparation' >&2; exit 1; }

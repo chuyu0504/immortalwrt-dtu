@@ -7,8 +7,8 @@
  * concatenates the same page of two adjacent physical blocks. Offsets are
  * absolute NAND offsets; the 10 MiB sys offset must not be subtracted here.
  *
- * The native MTD stays private. The original compatible remains read-only;
- * the separate writable compatible only permits writes within sys.
+ * The native MTD stays private. Only sys permits program/erase operations;
+ * boot0, U-Boot and secure storage remain protected by this logical layer.
  */
 
 #include <linux/errno.h>
@@ -20,7 +20,7 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 
-#include "aw-compat-ro.h"
+#include "aw-compat.h"
 
 #define AW_PHY_PAGE	4096U
 #define AW_PHY_BLOCK	SZ_256K
@@ -243,8 +243,6 @@ static int aw_erase(struct mtd_info *mtd, struct erase_info *info)
 	int ret = 0;
 	unsigned int half;
 
-	if (!compat->writable)
-		return -EROFS;
 	if (info->addr < AW_WRITE_START || info->addr > mtd->size ||
 	    info->len > mtd->size - info->addr ||
 	    info->addr % AW_BLOCK || info->len % AW_BLOCK)
@@ -329,8 +327,6 @@ static int aw_write_oob(struct mtd_info *mtd, loff_t to, struct mtd_oob_ops *ops
 
 	ops->retlen = 0;
 	ops->oobretlen = 0;
-	if (!compat->writable)
-		return -EROFS;
 	if (ops->mode == MTD_OPS_RAW ||
 	    (spare && ops->mode != MTD_OPS_AUTO_OOB))
 		return -EOPNOTSUPP;
@@ -379,8 +375,6 @@ static int aw_markbad(struct mtd_info *mtd, loff_t offset)
 	int ret = 0, err;
 	bool newly_marked = false;
 
-	if (!compat->writable)
-		return -EROFS;
 	if (offset < AW_WRITE_START || offset >= mtd->size)
 		return -EINVAL;
 	base = (offset / AW_BLOCK) * AW_BLOCK;
@@ -429,7 +423,7 @@ static void aw_resume(struct mtd_info *mtd)
 }
 
 int aw_spinand_compat_init(struct aw_spinand_compat *compat,
-			 struct mtd_info *physical, bool writable)
+			 struct mtd_info *physical)
 {
 	struct mtd_info *mtd = &compat->mtd;
 
@@ -437,16 +431,14 @@ int aw_spinand_compat_init(struct aw_spinand_compat *compat,
 	if (physical->size != SZ_512M || physical->writesize != AW_PHY_PAGE ||
 	    physical->erasesize != AW_PHY_BLOCK || physical->oobsize != AW_PHY_OOB ||
 	    physical->ecc_strength != 8 || physical->ecc_step_size != 512 ||
-	    !physical->_read_oob ||
-	    (writable && (!physical->_write_oob || !physical->_erase)))
+	    !physical->_read_oob || !physical->_write_oob || !physical->_erase)
 		return -EINVAL;
 
 	compat->physical = physical;
-	compat->writable = writable;
 	mutex_init(&compat->lock);
 	mtd->name = "sunxi_mtd_nand";
 	mtd->type = MTD_NANDFLASH;
-	mtd->flags = MTD_CAP_NANDFLASH & (writable ? ~0U : ~MTD_WRITEABLE);
+	mtd->flags = MTD_CAP_NANDFLASH;
 	mtd->owner = THIS_MODULE;
 	mtd->size = physical->size;
 	mtd->writesize = AW_PAGE;
@@ -497,8 +489,7 @@ int aw_spinand_compat_register(struct spinand_device *spinand)
 	compat = devm_kzalloc(dev, sizeof(*compat), GFP_KERNEL);
 	if (!compat)
 		return -ENOMEM;
-	ret = aw_spinand_compat_init(compat, spinand_to_mtd(spinand),
-				    !spinand->aw_compat_readonly);
+	ret = aw_spinand_compat_init(compat, spinand_to_mtd(spinand));
 	if (ret)
 		return dev_err_probe(dev, ret, "Unsupported ECM30 NAND geometry\n");
 	compat->mtd.dev.parent = dev;
@@ -508,8 +499,7 @@ int aw_spinand_compat_register(struct spinand_device *spinand)
 	if (ret)
 		return ret;
 	spinand->aw_compat = compat;
-	dev_info(dev, "AW NAND compatibility: %s, 8192-byte pages, 524288-byte blocks\n",
-		 compat->writable ? "sys writable" : "read-only");
+	dev_info(dev, "AW NAND compatibility: 8192-byte pages, 524288-byte blocks, sys read/write\n");
 	return 0;
 }
 

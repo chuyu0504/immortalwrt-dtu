@@ -1,9 +1,9 @@
 From: ECM30 bring-up <noreply@localhost>
-Subject: [PATCH] mtd: spi-nand: add the ECM30 AW paired-block view
+Subject: [PATCH] mtd: spi-nand: support ECM30 AW paired-block NAND
 
-Keep native geometry private. The original RO compatible still blocks WREN
-and preserves hardware protection. The separate writable compatible routes
-only sys writes through the vendor paired-page map and one-byte BBM rules.
+Keep native geometry private. Program, erase and bad-block operations use
+one vendor-compatible 8 KiB / 512 KiB logical view. Restrict writes to sys;
+boot0, U-Boot and secure storage remain protected.
 
 --- a/drivers/mtd/nand/spi/core.c
 +++ b/drivers/mtd/nand/spi/core.c
@@ -12,25 +12,19 @@ only sys writes through the vendor paired-page map and one-byte BBM rules.
  #include <linux/spi/spi.h>
  #include <linux/spi/spi-mem.h>
 +
-+#include "aw-compat-ro.h"
++#include "aw-compat.h"
  
  static int spinand_read_reg_op(struct spinand_device *spinand, u8 reg, u8 *val)
  {
-@@ -357,9 +359,12 @@
- 		engine_conf->status = status;
- }
- 
--static int spinand_write_enable_op(struct spinand_device *spinand)
-+int spinand_write_enable_op(struct spinand_device *spinand)
+@@ -360,6 +362,7 @@
+ static int spinand_write_enable_op(struct spinand_device *spinand)
  {
  	struct spi_mem_op op = SPINAND_WR_EN_DIS_OP(true);
 +
-+	if (spinand->aw_compat_readonly)
-+		return -EROFS;
  
  	return spi_mem_exec_op(spinand->spimem, &op);
  }
-@@ -1014,6 +1019,32 @@
+@@ -1014,6 +1017,32 @@
  	ret = nanddev_mtd_erase(mtd, einfo);
  	mutex_unlock(&spinand->lock);
  
@@ -49,7 +43,7 @@ only sys writes through the vendor paired-page map and one-byte BBM rules.
 +	struct nand_pos pos;
 +	int ret;
 +
-+	if (!spinand->aw_compat_enabled || spinand->aw_compat_readonly)
++	if (!spinand->aw_compat_enabled)
 +		return -EROFS;
 +	if (einfo->addr < 10 * 1024 * 1024 ||
 +	    einfo->addr >= mtd->size || einfo->len != mtd->erasesize ||
@@ -63,22 +57,10 @@ only sys writes through the vendor paired-page map and one-byte BBM rules.
  	return ret;
  }
  
-@@ -1365,6 +1396,10 @@
- 		return ret;
- 	}
- 
-+	/* Preserve block protection during read-only bring-up and resume. */
-+	if (spinand->aw_compat_readonly)
-+		return 0;
-+
- 	/* After power up, all blocks are locked, so unlock them here. */
- 	for (i = 0; i < nand->memorg.ntargets; i++) {
- 		ret = spinand_select_target(spinand, i);
-@@ -1416,6 +1451,18 @@
- 	ret = spinand_detect(spinand);
+@@ -1417,6 +1446,18 @@
  	if (ret)
  		goto err_free_bufs;
-+
+ 
 +	if (spinand->aw_compat_enabled &&
 +	    (spinand->id.data[0] != 0xc8 || spinand->id.data[1] != 0x94)) {
 +		ret = -ENODEV;
@@ -90,21 +72,20 @@ only sys writes through the vendor paired-page map and one-byte BBM rules.
 +		ret = -EOPNOTSUPP;
 +		goto err_free_bufs;
 +	}
- 
++
  	/*
  	 * Use kzalloc() instead of devm_kzalloc() here, because some drivers
-@@ -1528,6 +1575,10 @@
+ 	 * may use this buffer for DMA access.
+@@ -1528,6 +1569,8 @@
  		return -ENOMEM;
  
  	spinand->spimem = mem;
-+	spinand->aw_compat_readonly = of_device_is_compatible(mem->spi->dev.of_node,
-+						"ebyte,ecm30-aw-spinand-ro");
-+	spinand->aw_compat_enabled = spinand->aw_compat_readonly ||
-+		of_device_is_compatible(mem->spi->dev.of_node, "ebyte,ecm30-aw-spinand");
++	spinand->aw_compat_enabled = of_device_is_compatible(mem->spi->dev.of_node,
++						"ebyte,ecm30-aw-spinand");
  	spi_mem_set_drvdata(mem, spinand);
  	spinand_set_of_node(spinand, mem->spi->dev.of_node);
  	mutex_init(&spinand->lock);
-@@ -1538,7 +1589,12 @@
+@@ -1538,7 +1581,12 @@
  	if (ret)
  		return ret;
  
@@ -112,13 +93,13 @@ only sys writes through the vendor paired-page map and one-byte BBM rules.
 +	if (spinand->aw_compat_enabled) {
 +		mtd->_erase = spinand_mtd_aw_erase;
 +		ret = aw_spinand_compat_register(spinand);
-+	}
-+	else
++	} else {
 +		ret = mtd_device_register(mtd, NULL, 0);
++	}
  	if (ret)
  		goto err_spinand_cleanup;
  
-@@ -1559,7 +1615,10 @@
+@@ -1559,7 +1607,10 @@
  	spinand = spi_mem_get_drvdata(mem);
  	mtd = spinand_to_mtd(spinand);
  
@@ -140,34 +121,24 @@ only sys writes through the vendor paired-page map and one-byte BBM rules.
  
  #define SPINAND_MAX_ID_LEN	5
  /*
-@@ -410,6 +411,9 @@
+@@ -410,6 +411,8 @@
   * struct spinand_device - SPI NAND device instance
   * @base: NAND device instance
   * @spimem: pointer to the SPI mem object
 + * @aw_compat_enabled: use the ECM30 paired-block logical view
-+ * @aw_compat_readonly: forbid writes for the ECM30 vendor-format view
 + * @aw_compat: private paired-block logical MTD, no native alias
   * @lock: lock used to serialize accesses to the NAND
   * @id: NAND ID as returned by READ_ID
   * @flags: NAND flags
-@@ -441,6 +445,9 @@
+@@ -441,6 +444,8 @@
  struct spinand_device {
  	struct nand_device base;
  	struct spi_mem *spimem;
 +	bool aw_compat_enabled;
-+	bool aw_compat_readonly;
 +	struct aw_spinand_compat *aw_compat;
  	struct mutex lock;
  	struct spinand_id id;
  	u32 flags;
-@@ -536,6 +543,7 @@
- 
- int spinand_upd_cfg(struct spinand_device *spinand, u8 mask, u8 val);
- int spinand_write_reg_op(struct spinand_device *spinand, u8 reg, u8 val);
-+int spinand_write_enable_op(struct spinand_device *spinand);
- int spinand_select_target(struct spinand_device *spinand, unsigned int target);
- 
- #endif /* __LINUX_MTD_SPINAND_H */
 --- a/drivers/mtd/nand/spi/gigadevice.c
 +++ b/drivers/mtd/nand/spi/gigadevice.c
 @@ -54,6 +54,10 @@
@@ -222,8 +193,8 @@ only sys writes through the vendor paired-page map and one-byte BBM rules.
  spinand-objs += micron.o paragon.o toshiba.o winbond.o xtx.o
  obj-$(CONFIG_MTD_SPI_NAND) += spinand.o
 +
-+spinand-objs += aw-compat-ro.o
-+spinand-$(CONFIG_MTD_SPI_NAND_AW_COMPAT_KUNIT_TEST) += aw-compat-ro-test.o
++spinand-objs += aw-compat.o
++spinand-$(CONFIG_MTD_SPI_NAND_AW_COMPAT_KUNIT_TEST) += aw-compat-test.o
 --- a/drivers/mtd/nand/spi/Kconfig
 +++ b/drivers/mtd/nand/spi/Kconfig
 @@ -7,3 +7,11 @@

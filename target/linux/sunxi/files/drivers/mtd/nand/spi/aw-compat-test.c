@@ -4,7 +4,7 @@
 #include <linux/mtd/spinand.h>
 #include <linux/sizes.h>
 
-#include "aw-compat-ro.h"
+#include "aw-compat.h"
 
 struct aw_test_call {
 	loff_t from;
@@ -131,7 +131,7 @@ static int aw_test_init(struct kunit *test)
 	};
 	ctx->bad_block = -1;
 	ctx->error_block = -1;
-	return aw_spinand_compat_init(&ctx->compat, &ctx->physical, false);
+	return aw_spinand_compat_init(&ctx->compat, &ctx->physical);
 }
 
 static int aw_test_read(struct aw_test_ctx *ctx, loff_t from, size_t len)
@@ -156,9 +156,9 @@ static void aw_geometry_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, mtd->oobsize, 256U);
 	KUNIT_EXPECT_EQ(test, mtd->oobavail, 32U);
 	KUNIT_EXPECT_EQ(test, mtd->subpage_sft, 1U);
-	KUNIT_EXPECT_FALSE(test, mtd->flags & MTD_WRITEABLE);
+	KUNIT_EXPECT_TRUE(test, mtd->flags & MTD_WRITEABLE);
 	ctx->physical.writesize = 2048;
-	KUNIT_EXPECT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, false), -EINVAL);
+	KUNIT_EXPECT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), -EINVAL);
 }
 
 static void aw_paired_pages_test(struct kunit *test)
@@ -300,28 +300,15 @@ static void aw_bounds_and_modes_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, mtd->_read_oob(mtd, 0, &ops), -EOPNOTSUPP);
 }
 
-static void aw_write_rejection_test(struct kunit *test)
+static void aw_backend_requirements_test(struct kunit *test)
 {
 	struct aw_test_ctx *ctx = test->priv;
-	struct mtd_info *mtd = &ctx->compat.mtd;
-	struct spinand_device *spinand = kunit_kzalloc(test, sizeof(*spinand), GFP_KERNEL);
-	struct erase_info erase = { .len = SZ_512K };
-	struct mtd_oob_ops ops = {
-		.mode = MTD_OPS_AUTO_OOB, .datbuf = ctx->data, .len = 8192,
-	};
 
-	KUNIT_ASSERT_NOT_NULL(test, spinand);
-	KUNIT_EXPECT_EQ(test, mtd_write_oob(mtd, 0, &ops), -EROFS);
-	KUNIT_EXPECT_EQ(test, mtd_erase(mtd, &erase), -EROFS);
-	/* The callbacks still reject writes if an upper layer changes flags. */
-	mtd->flags |= MTD_WRITEABLE;
-	KUNIT_EXPECT_EQ(test, mtd->_write_oob(mtd, 0, &ops), -EROFS);
-	KUNIT_EXPECT_EQ(test, mtd->_erase(mtd, &erase), -EROFS);
-	KUNIT_EXPECT_EQ(test, mtd->_block_markbad(mtd, 0), -EROFS);
-	spinand->aw_compat_readonly = true;
-	/* spimem is NULL: reaching the bus would fail this test. */
-	KUNIT_EXPECT_EQ(test, spinand_write_enable_op(spinand), -EROFS);
-	KUNIT_EXPECT_EQ(test, ctx->ncalls, 0U);
+	ctx->physical._write_oob = NULL;
+	KUNIT_EXPECT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), -EINVAL);
+	ctx->physical._write_oob = aw_fake_write;
+	ctx->physical._erase = NULL;
+	KUNIT_EXPECT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), -EINVAL);
 }
 
 static void aw_write_mapping_test(struct kunit *test)
@@ -334,7 +321,7 @@ static void aw_write_mapping_test(struct kunit *test)
 	};
 	unsigned int i;
 
-	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, true), 0);
+	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), 0);
 	for (i = 0; i < 4; i++)
 		memset(ctx->data + i * 4096, 0x30 + i, 4096);
 	KUNIT_ASSERT_EQ(test, mtd_write_oob(mtd, start, &ops), 0);
@@ -360,7 +347,7 @@ static void aw_write_subpage_oob_test(struct kunit *test)
 		.mode = MTD_OPS_PLACE_OOB, .datbuf = ctx->data, .len = 4096,
 	};
 
-	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, true), 0);
+	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), 0);
 	KUNIT_ASSERT_EQ(test, mtd_write_oob(mtd, start + 4096, &ops), 0);
 	KUNIT_EXPECT_EQ(test, ctx->nwrites, 1U);
 	KUNIT_EXPECT_EQ(test, ctx->writes[0].from, start + SZ_256K);
@@ -387,7 +374,7 @@ static void aw_write_failure_test(struct kunit *test)
 		.mode = MTD_OPS_PLACE_OOB, .datbuf = ctx->data, .len = 8192,
 	};
 
-	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, true), 0);
+	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), 0);
 	ctx->write_results[1] = -ETIMEDOUT;
 	KUNIT_EXPECT_EQ(test, mtd_write_oob(mtd, SZ_8M + SZ_2M, &ops), -ETIMEDOUT);
 	KUNIT_EXPECT_EQ(test, ops.retlen, (size_t)4096);
@@ -409,7 +396,7 @@ static void aw_write_protection_test(struct kunit *test)
 	struct erase_info erase = { .addr = SZ_8M, .len = SZ_512K };
 	loff_t start = SZ_8M + SZ_2M;
 
-	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, true), 0);
+	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), 0);
 	KUNIT_EXPECT_EQ(test, mtd->_write_oob(mtd, SZ_8M, &ops), -EINVAL);
 	KUNIT_EXPECT_EQ(test, mtd->_write_oob(mtd, start + 1, &ops), -EINVAL);
 	KUNIT_EXPECT_EQ(test, mtd->_write_oob(mtd, SZ_512M, &ops), -EINVAL);
@@ -431,7 +418,7 @@ static void aw_erase_pair_test(struct kunit *test)
 	struct erase_info erase = { .addr = start, .len = SZ_1M };
 	unsigned int i;
 
-	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, true), 0);
+	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), 0);
 	KUNIT_ASSERT_EQ(test, mtd_erase(mtd, &erase), 0);
 	KUNIT_ASSERT_EQ(test, ctx->nerases, 4U);
 	for (i = 0; i < 4; i++)
@@ -449,7 +436,7 @@ static void aw_erase_bad_block_test(struct kunit *test)
 	struct mtd_info *mtd = &ctx->compat.mtd;
 	struct erase_info erase = { .addr = SZ_8M + SZ_2M, .len = SZ_512K };
 
-	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, true), 0);
+	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), 0);
 	ctx->bad_block = 41;
 	KUNIT_EXPECT_EQ(test, mtd_erase(mtd, &erase), -EIO);
 	KUNIT_EXPECT_EQ(test, ctx->nerases, 0U);
@@ -463,7 +450,7 @@ static void aw_markbad_pair_test(struct kunit *test)
 	loff_t start = SZ_8M + SZ_2M;
 	unsigned int i;
 
-	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical, true), 0);
+	KUNIT_ASSERT_EQ(test, aw_spinand_compat_init(&ctx->compat, &ctx->physical), 0);
 	ctx->erase_results[0] = -EIO;
 	KUNIT_ASSERT_EQ(test, mtd->_block_markbad(mtd, start), 0);
 	KUNIT_ASSERT_EQ(test, ctx->nerases, 2U);
@@ -489,7 +476,7 @@ static struct kunit_case aw_test_cases[] = {
 	KUNIT_CASE(aw_bad_block_pair_test),
 	KUNIT_CASE(aw_ecc_and_partial_read_test),
 	KUNIT_CASE(aw_bounds_and_modes_test),
-	KUNIT_CASE(aw_write_rejection_test),
+	KUNIT_CASE(aw_backend_requirements_test),
 	KUNIT_CASE(aw_write_mapping_test),
 	KUNIT_CASE(aw_write_subpage_oob_test),
 	KUNIT_CASE(aw_write_failure_test),
@@ -501,7 +488,7 @@ static struct kunit_case aw_test_cases[] = {
 };
 
 static struct kunit_suite aw_test_suite = {
-	.name = "ecm30-aw-spinand-ro",
+	.name = "ecm30-aw-spinand",
 	.init = aw_test_init,
 	.test_cases = aw_test_cases,
 };
