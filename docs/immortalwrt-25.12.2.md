@@ -36,11 +36,13 @@ NAND 测试脚本从目标的内核版本文件读取版本及校验值。
 
 ## 构建与验证
 
-源码先在本地提交并推送，再由 `10.10.0.101` 的
+源码先在本地提交并推送，再由用户更正的 `10.10.0.100` 的
 `/home/openwrtbuild/immortalwrt-dtu` 拉取构建。迁移改变了内核、工具链及依赖
 基线，首次正式构建需要清理旧输出；不可复用 6.18 的编译结果。
 按照 AGENTS.md 更新固定 feeds、运行 `scripts/install-tas-feeds.sh`，复制
 `configs/tastek-mt76x8.config` 后执行 `make defconfig` 和完整固件构建。
+ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用rootfs产物，
+保持8 KiB逻辑页、512 KiB逻辑块和NAND写入拒绝；完整构建后重新验证4G和双网口。
 
 此前 ECM30 文档中的 6.18 硬件测试属于历史证据，不能视为 6.12 已通过实机
 验证。完整固件、最终 rootfs、ELF 依赖、镜像大小与 SHA-256 仍需在正式构建后
