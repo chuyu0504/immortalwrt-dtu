@@ -1,0 +1,43 @@
+Subject: [PATCH] net: phy: add opt-in ECM30 JLSemi RMII reference clock setup
+
+The observed PHY ID is 0x937c4024. Generic PHY handles its standard link
+registers, but leaves P7:R16 bit 12 set (50 MHz input). ECM30 instead needs
+the PHY to supply 50 MHz to the MAC. Hardware testing confirms that clearing
+this bit removes MAC reset timeouts and allows 100 Mbps full-duplex traffic.
+
+The local jlsemi,rmii-refclk-out property explicitly requests this setup.
+Keep every other configuration unchanged without that property. This is
+downstream board bring-up support, not an upstream JL1111 binding or a claim
+that all PHYs sharing this vendor ID have the same model.
+
+Register reference:
+https://github.com/hpmicro/hpm_sdk/blob/main/components/enet_phy/jl1111/hpm_jl1111.c
+
+--- a/drivers/net/phy/Kconfig
++++ b/drivers/net/phy/Kconfig
+@@ -309,6 +309,15 @@
+ 	tristate "ICPlus PHYs"
+ 	help
+ 	  Currently supports the IP175C and IP1001 PHYs.
++
++config JLSEMI_ECM30_PHY
++	tristate "ECM30 JLSemi RMII PHY initialization"
++	depends on OF_MDIO
++	help
++	  Support the PHY with exact ID 0x937c4024 observed on Ebyte ECM30.
++	  The downstream jlsemi,rmii-refclk-out device-tree property requests
++	  PHY-generated 50 MHz RMII reference clock output. Without this
++	  property its standard link operation is left unchanged.
+ 
+ config LXT_PHY
+ 	tristate "Intel LXT PHYs"
+--- a/drivers/net/phy/Makefile
++++ b/drivers/net/phy/Makefile
+@@ -78,6 +78,7 @@
+ obj-$(CONFIG_ICPLUS_PHY)	+= icplus.o
+ obj-$(CONFIG_INTEL_XWAY_PHY)	+= intel-xway.o
+ obj-$(CONFIG_LSI_ET1011C_PHY)	+= et1011c.o
++obj-$(CONFIG_JLSEMI_ECM30_PHY)	+= jlsemi-ecm30.o
+ obj-$(CONFIG_LXT_PHY)		+= lxt.o
+ obj-$(CONFIG_MARVELL_10G_PHY)	+= marvell10g.o
+ obj-$(CONFIG_MARVELL_PHY)	+= marvell.o

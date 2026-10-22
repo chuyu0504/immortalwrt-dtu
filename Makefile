@@ -8,6 +8,11 @@ LANG:=C
 TZ:=UTC
 export TOPDIR LC_ALL LANG TZ
 
+# GNU host tools such as tar otherwise refuse to configure as root.
+ifeq ($(shell id -u),0)
+  export FORCE_UNSAFE_CONFIGURE=1
+endif
+
 empty:=
 space:= $(empty) $(empty)
 $(if $(findstring $(space),$(TOPDIR)),$(error ERROR: The path to the OpenWrt directory must not include any spaces))

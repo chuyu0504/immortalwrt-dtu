@@ -1,50 +1,32 @@
 # SPDX-License-Identifier: GPL-2.0-only
-#
-# Copyright (C) 2013-2016 OpenWrt.org
-# Copyright (C) 2016 Yousong Zhou
 
 include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/image.mk
 
-FAT32_BLOCK_SIZE=1024
-FAT32_BLOCKS=$(shell echo $$(($(CONFIG_SUNXI_SD_BOOT_PARTSIZE)*1024*1024/$(FAT32_BLOCK_SIZE))))
-
-DEVICE_VARS := SUNXI_DTS SUNXI_DTS_DIR
-
-define Build/sunxi-sdcard
-	rm -f $@.boot
-	mkfs.fat $@.boot -C $(FAT32_BLOCKS)
-
-	mcopy -i $@.boot $(STAGING_DIR_IMAGE)/$(DEVICE_NAME)-boot.scr ::boot.scr
-	mcopy -i $@.boot $(IMAGE_KERNEL) ::uImage
-	./gen_sunxi_sdcard_img.sh $@ \
-		$@.boot \
-		$(IMAGE_ROOTFS) \
-		$(CONFIG_SUNXI_SD_BOOT_PARTSIZE) \
-		$(CONFIG_TARGET_ROOTFS_PARTSIZE) \
-		$(STAGING_DIR_IMAGE)/$(DEVICE_NAME)-u-boot-with-spl.bin
-	rm -f $@.boot
-endef
-
-# why \x00\x00\x00\x00 for zImage-initramfs
 define Device/Default
   PROFILES := Default
   KERNEL_NAME := zImage
-  KERNEL := kernel-bin | uImage none
-  IMAGES := sdcard.img.gz
-  IMAGE/sdcard.img.gz := sunxi-sdcard | append-metadata | gzip
-  SUNXI_DTS_DIR := allwinner/
-  SUNXI_DTS = $$(SUNXI_DTS_DIR)$$(SOC)-$(lastword $(subst _, ,$(1)))
+  # Keep the compressed kernel above OP-TEE; zImage expands at 0x40008000.
+  KERNEL_LOADADDR := 0x43000000
+  KERNEL := kernel-bin | append-dtb | uImage none
+  KERNEL_INITRAMFS := kernel-bin | append-dtb | uImage none
+  KERNEL_INITRAMFS_SUFFIX := -uImage
+  DEVICE_DTS_DIR := ../dts
+  # RAM boot only: do not emit sdcard, factory, UBI or sysupgrade images.
+  IMAGES :=
 endef
 
-define Device/FitImageLzma
-  KERNEL = kernel-bin | lzma | fit lzma $$(DTS_DIR)/$$(SUNXI_DTS).dtb
+define Device/ebyte_ecm30
+  DEVICE_VENDOR := Ebyte
+  DEVICE_MODEL := T113-I ECM30
+  DEVICE_VARIANT := experimental RAM bring-up
+  DEVICE_DTS := sun8i-t113i-ebyte-ecm30
+  SUPPORTED_DEVICES := ebyte,ecm30
+  ARTIFACTS := board.dtb
+  ARTIFACT/board.dtb := append-dtb
+  DEVICE_PACKAGES := kmod-usb2 kmod-usb-ohci kmod-usb-net-cdc-ether \
+    kmod-usb-serial-option
 endef
-
-define Device/FitImageGzip
-  KERNEL = kernel-bin | gzip | fit gzip $$(DTS_DIR)/$$(SUNXI_DTS).dtb
-endef
-
-include $(SUBTARGET).mk
+TARGET_DEVICES += ebyte_ecm30
 
 $(eval $(call BuildImage))

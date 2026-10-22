@@ -1,0 +1,632 @@
+#include "log.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "edge_protocol.h"
+
+#ifndef EDGE_LOG_ROOT
+#define EDGE_LOG_ROOT "/tmp/edgenode"
+#endif
+#ifndef EDGE_LOG_SPACE_PATH
+#define EDGE_LOG_SPACE_PATH "/tmp"
+#endif
+#define EDGE_LOG_DIR EDGE_LOG_ROOT "/logs"
+#define EDGE_LOG_PATH EDGE_LOG_DIR "/current.log"
+#define EDGE_LOCAL_LOG_PATH EDGE_LOG_DIR "/acquisition.log"
+#define EDGE_LOCAL_LOCK_PATH EDGE_LOG_DIR "/acquisition.lock"
+#define EDGE_LOCAL_LOG_MAX_FILES 4U
+#define EDGE_LOCAL_LOG_MAX_BYTES (256U * 1024U)
+#define EDGE_LOCAL_FAULT_CACHE_SIZE 128U
+#define EDGE_LOCAL_FAULT_REPEAT_MS 60000LL
+#define EDGE_LOG_MAX_FILE_BYTES (256U * 1024U)
+#define EDGE_LOG_MAX_FILES 16U
+#define EDGE_LOG_FREE_PERCENT 20U
+#define EDGE_LOG_LEVEL_PATH EDGE_LOG_ROOT "/log-level"
+#define EDGE_LOG_LEVEL_TEMP EDGE_LOG_ROOT "/log-level.tmp"
+#define EDGE_LOG_LEASE_MS 300000LL
+
+static int log_threshold = 4;
+static char log_level_name[9] = "silent";
+static int64_t log_deadline_ms;
+static int64_t log_refresh_ms;
+static bool log_settings_ready;
+
+typedef struct {
+  uint8_t platform[16], device[16];
+  unsigned protocol, fault, reason;
+  int64_t written_at_ms;
+} local_fault_entry;
+static local_fault_entry local_faults[EDGE_LOCAL_FAULT_CACHE_SIZE];
+static unsigned next_local_fault;
+
+static int64_t monotonic_ms(void) {
+  struct timespec value;
+  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
+    return -1;
+  return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
+}
+
+static void silence_logs(void) {
+  log_threshold = 4;
+  memcpy(log_level_name, "silent", sizeof("silent"));
+  log_deadline_ms = 0;
+}
+
+static int64_t now_ms(void) {
+  struct timespec value;
+  if (clock_gettime(CLOCK_REALTIME, &value) != 0)
+    return 0;
+  return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
+}
+
+static void copy_text(char *output, size_t capacity, const char *input) {
+  if (capacity == 0U)
+    return;
+  snprintf(output, capacity, "%s", input != NULL ? input : "");
+}
+
+static int level_rank(const char *level) {
+  if (level != NULL && strcmp(level, "debug") == 0)
+    return 0;
+  if (level != NULL && strcmp(level, "warn") == 0)
+    return 2;
+  if (level != NULL && strcmp(level, "error") == 0)
+    return 3;
+  if (level != NULL && strcmp(level, "silent") == 0)
+    return 4;
+  return 1;
+}
+
+static bool valid_level(const char *level) {
+  return level != NULL &&
+         (strcmp(level, "debug") == 0 || strcmp(level, "info") == 0 ||
+          strcmp(level, "warn") == 0 || strcmp(level, "error") == 0 ||
+          strcmp(level, "silent") == 0);
+}
+
+static bool ensure_directory(const char *path) {
+  if (mkdir(path, 0700) == 0 || errno == EEXIST)
+    return true;
+  return false;
+}
+
+static bool ensure_log_dir(void) {
+  return ensure_directory(EDGE_LOG_ROOT) && ensure_directory(EDGE_LOG_DIR);
+}
+
+static void log_path(unsigned index, char *path, size_t size) {
+  if (index == 0U)
+    snprintf(path, size, "%s", EDGE_LOG_PATH);
+  else
+    snprintf(path, size, "%s.%u", EDGE_LOG_PATH, index);
+}
+
+static off_t file_size(const char *path) {
+  struct stat info;
+  if (stat(path, &info) != 0)
+    return 0;
+  return info.st_size;
+}
+
+static bool tmpfs_has_reserve(void) {
+  struct statvfs fs;
+  if (statvfs(EDGE_LOG_SPACE_PATH, &fs) != 0 || fs.f_blocks == 0U)
+    return true;
+  const unsigned long long available =
+      (unsigned long long)fs.f_bavail * (unsigned long long)fs.f_frsize;
+  const unsigned long long total =
+      (unsigned long long)fs.f_blocks * (unsigned long long)fs.f_frsize;
+  return available * 100ULL >= total * EDGE_LOG_FREE_PERCENT;
+}
+
+static bool remove_oldest_log(void) {
+  for (int index = (int)EDGE_LOG_MAX_FILES - 1; index >= 1; --index) {
+    char path[128];
+    log_path((unsigned)index, path, sizeof(path));
+    if (access(path, F_OK) == 0) {
+      (void)unlink(path);
+      return true;
+    }
+  }
+  if (access(EDGE_LOG_PATH, F_OK) == 0) {
+    FILE *output = fopen(EDGE_LOG_PATH, "w");
+    if (output != NULL) {
+      fclose(output);
+      return true;
+    }
+  }
+  return false;
+}
+
+static void enforce_space_reserve(void) {
+  for (unsigned attempt = 0U; attempt < EDGE_LOG_MAX_FILES + 1U; ++attempt) {
+    if (tmpfs_has_reserve())
+      return;
+    if (!remove_oldest_log())
+      return;
+  }
+}
+
+static void rotate_logs(void) {
+  char from[128];
+  char to[128];
+  log_path(EDGE_LOG_MAX_FILES - 1U, to, sizeof(to));
+  (void)unlink(to);
+  for (int index = (int)EDGE_LOG_MAX_FILES - 2; index >= 1; --index) {
+    log_path((unsigned)index, from, sizeof(from));
+    log_path((unsigned)index + 1U, to, sizeof(to));
+    if (access(from, F_OK) == 0)
+      (void)rename(from, to);
+  }
+  log_path(1U, to, sizeof(to));
+  if (access(EDGE_LOG_PATH, F_OK) == 0)
+    (void)rename(EDGE_LOG_PATH, to);
+}
+
+static void write_escaped(FILE *output, const char *input, size_t limit) {
+  size_t written = 0U;
+  const unsigned char *cursor =
+      (const unsigned char *)(input != NULL ? input : "");
+  while (*cursor != '\0' && written < limit) {
+    const unsigned char value = *cursor++;
+    char escaped = '\0';
+    if (value == '\\')
+      escaped = '\\';
+    else if (value == '\t')
+      escaped = 't';
+    else if (value == '\n')
+      escaped = 'n';
+    else if (value == '\r')
+      escaped = 'r';
+    if (escaped != '\0') {
+      if (written + 2U > limit)
+        break;
+      fputc('\\', output);
+      fputc(escaped, output);
+      written += 2U;
+    } else {
+      fputc(value >= 32U && value != 127U ? value : ' ', output);
+      ++written;
+    }
+  }
+}
+
+static void copy_unescaped(char *output, size_t capacity, const char *input) {
+  if (capacity == 0U)
+    return;
+  size_t written = 0U;
+  for (size_t index = 0U;
+       input != NULL && input[index] != '\0' && written + 1U < capacity;
+       ++index) {
+    char value = input[index];
+    if (value == '\\' && input[index + 1U] != '\0') {
+      const char next = input[++index];
+      value = next == 't'   ? '\t'
+              : next == 'n' ? '\n'
+              : next == 'r' ? '\r'
+                            : next;
+    }
+    output[written++] = value;
+  }
+  output[written] = '\0';
+}
+
+static bool split_line(char *line, char **parts, size_t count) {
+  if (line == NULL || parts == NULL || count == 0U)
+    return false;
+  parts[0] = line;
+  size_t output = 1U;
+  for (char *cursor = line; *cursor != '\0' && output < count; ++cursor) {
+    if (*cursor == '\t') {
+      *cursor = '\0';
+      parts[output++] = cursor + 1;
+    }
+  }
+  return output == count;
+}
+
+static bool parse_time_ms(const char *text, int64_t *output) {
+  if (text == NULL || output == NULL)
+    return false;
+  char *end = NULL;
+  errno = 0;
+  const long long value = strtoll(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0')
+    return false;
+  *output = (int64_t)value;
+  return true;
+}
+
+static bool matches(const iot_edge_v1_LogRequest *request, const char *level,
+                    const char *source) {
+  if (request == NULL)
+    return false;
+  if (request->level[0] != '\0' && strcmp(level, request->level) != 0)
+    return false;
+  if (request->source[0] != '\0' && strcmp(source, request->source) != 0)
+    return false;
+  return true;
+}
+
+static void append_line(char *line, const iot_edge_v1_LogRequest *request,
+                        iot_edge_v1_LogResult *result, uint32_t limit) {
+  char *parts[5] = {0};
+  int64_t time = 0;
+  if (result->lines_count >= limit || !split_line(line, parts, 5U) ||
+      !parse_time_ms(parts[0], &time) || !matches(request, parts[1], parts[2]))
+    return;
+  iot_edge_v1_LogLine *output = &result->lines[result->lines_count++];
+  output->time_ms = time;
+  copy_unescaped(output->level, sizeof(output->level), parts[1]);
+  copy_unescaped(output->source, sizeof(output->source), parts[2]);
+  copy_unescaped(output->message, sizeof(output->message), parts[3]);
+  copy_unescaped(output->detail, sizeof(output->detail), parts[4]);
+}
+
+static void read_reverse_file(const char *path,
+                              const iot_edge_v1_LogRequest *request,
+                              iot_edge_v1_LogResult *result, uint32_t limit) {
+  FILE *input = fopen(path, "rb");
+  if (input == NULL)
+    return;
+  if (fseek(input, 0, SEEK_END) != 0) {
+    fclose(input);
+    return;
+  }
+  long size = ftell(input);
+  if (size <= 0L) {
+    fclose(input);
+    return;
+  }
+  if ((unsigned long)size > EDGE_LOG_MAX_FILE_BYTES * 2UL)
+    size = (long)(EDGE_LOG_MAX_FILE_BYTES * 2UL);
+  char *buffer = malloc((size_t)size + 1U);
+  if (buffer == NULL) {
+    fclose(input);
+    return;
+  }
+  if (fseek(input, -size, SEEK_END) != 0) {
+    free(buffer);
+    fclose(input);
+    return;
+  }
+  const size_t read = fread(buffer, 1U, (size_t)size, input);
+  fclose(input);
+  buffer[read] = '\0';
+
+  size_t end = read;
+  while (end != 0U && result->lines_count < limit) {
+    while (end != 0U && (buffer[end - 1U] == '\n' || buffer[end - 1U] == '\r'))
+      --end;
+    if (end == 0U)
+      break;
+    size_t start = end;
+    while (start != 0U && buffer[start - 1U] != '\n')
+      --start;
+    buffer[end] = '\0';
+    append_line(buffer + start, request, result, limit);
+    end = start;
+  }
+  free(buffer);
+}
+
+void edge_log_init(void) {
+  silence_logs();
+  log_refresh_ms = 0;
+  /* A process restart must not restore an earlier diagnostic lease. */
+  log_settings_ready = unlink(EDGE_LOG_LEVEL_PATH) == 0 || errno == ENOENT;
+  (void)unlink(EDGE_LOG_LEVEL_TEMP);
+  if (ensure_log_dir())
+    enforce_space_reserve();
+}
+
+bool edge_log_set_level(const char *level) {
+  if (!valid_level(level))
+    return false;
+  const int64_t now = monotonic_ms();
+  if (now < 0 || !ensure_log_dir())
+    return false;
+  const int64_t deadline = strcmp(level, "silent") == 0 ? 0 : now + EDGE_LOG_LEASE_MS;
+  /* The main process writes; forked acquisition workers read the same lease.
+   * Rename prevents readers from observing a partially written setting. */
+  FILE *output = fopen(EDGE_LOG_LEVEL_TEMP, "w");
+  if (output == NULL)
+    return false;
+  bool saved = fprintf(output, "%s %" PRId64 "\n", level, deadline) > 0;
+  if (fclose(output) != 0)
+    saved = false;
+  if (!saved || rename(EDGE_LOG_LEVEL_TEMP, EDGE_LOG_LEVEL_PATH) != 0) {
+    (void)unlink(EDGE_LOG_LEVEL_TEMP);
+    return false;
+  }
+  copy_text(log_level_name, sizeof(log_level_name), level);
+  log_threshold = level_rank(level);
+  log_deadline_ms = deadline;
+  log_refresh_ms = now + 1000;
+  log_settings_ready = true;
+  return true;
+}
+
+static void refresh_log_level(void) {
+  const int64_t now = monotonic_ms();
+  if (now < 0 || !log_settings_ready) {
+    silence_logs();
+    return;
+  }
+  /* Local tmpfs only, at most once per second per process; no network traffic. */
+  if (now >= log_refresh_ms) {
+    char level[9];
+    int64_t deadline = 0;
+    FILE *input = fopen(EDGE_LOG_LEVEL_PATH, "r");
+    const bool valid = input != NULL &&
+        fscanf(input, "%8s %" SCNd64, level, &deadline) == 2 && valid_level(level);
+    if (input != NULL)
+      fclose(input);
+    silence_logs();
+    if (valid && deadline > now && deadline - now <= EDGE_LOG_LEASE_MS) {
+      copy_text(log_level_name, sizeof(log_level_name), level);
+      log_threshold = level_rank(level);
+      log_deadline_ms = deadline;
+    }
+    log_refresh_ms = now + 1000;
+  }
+  /* Check on every access, including before each write, even while offline. */
+  if (log_deadline_ms <= now)
+    silence_logs();
+}
+
+const char *edge_log_level(void) {
+  refresh_log_level();
+  return log_level_name;
+}
+
+bool edge_log_enabled(const char *level) {
+  refresh_log_level();
+  const int rank = level_rank(level);
+  return log_threshold < 4 && rank < 4 && rank >= log_threshold;
+}
+
+void edge_log_write(const char *level, const char *source, const char *message,
+                    const char *detail) {
+  if (!edge_log_enabled(level))
+    return;
+  if (!ensure_log_dir())
+    return;
+  if ((unsigned long)file_size(EDGE_LOG_PATH) >= EDGE_LOG_MAX_FILE_BYTES)
+    rotate_logs();
+  enforce_space_reserve();
+  FILE *output = fopen(EDGE_LOG_PATH, "a");
+  if (output == NULL)
+    return;
+  fprintf(output, "%" PRId64 "\t", now_ms());
+  write_escaped(output, level != NULL ? level : "info", 8U);
+  fputc('\t', output);
+  write_escaped(output, source != NULL ? source : "node", 16U);
+  fputc('\t', output);
+  write_escaped(output, message, 96U);
+  fputc('\t', output);
+  write_escaped(output, detail, 128U);
+  fputc('\n', output);
+  fclose(output);
+  if ((unsigned long)file_size(EDGE_LOG_PATH) >= EDGE_LOG_MAX_FILE_BYTES)
+    rotate_logs();
+  enforce_space_reserve();
+}
+
+static void local_log_path(unsigned index, char *path, size_t size) {
+  if (index == 0U)
+    snprintf(path, size, "%s", EDGE_LOCAL_LOG_PATH);
+  else
+    snprintf(path, size, "%s.%u", EDGE_LOCAL_LOG_PATH, index);
+}
+
+static void rotate_local_logs(void) {
+  char from[128], to[128];
+  local_log_path(EDGE_LOCAL_LOG_MAX_FILES - 1U, to, sizeof(to));
+  (void)unlink(to);
+  for (unsigned index = EDGE_LOCAL_LOG_MAX_FILES - 1U; index > 0U; --index) {
+    local_log_path(index - 1U, from, sizeof(from));
+    local_log_path(index, to, sizeof(to));
+    (void)rename(from, to);
+  }
+}
+
+static void hex_id(const uint8_t id[16], char output[33]) {
+  static const char digits[] = "0123456789abcdef";
+  for (unsigned index = 0U; index < 16U; ++index) {
+    output[index * 2U] = digits[id[index] >> 4U];
+    output[index * 2U + 1U] = digits[id[index] & 15U];
+  }
+  output[32] = '\0';
+}
+
+static bool write_local_event(const uint8_t platform_id[16],
+                              const uint8_t device_id[16], unsigned protocol,
+                              const char *event, unsigned value,
+                              unsigned points, unsigned frames) {
+  if (!ensure_log_dir() || !tmpfs_has_reserve())
+    return false;
+  static const uint8_t unknown_id[16] = {0};
+  char platform[33], device[33], line[208];
+  hex_id(platform_id != NULL ? platform_id : unknown_id, platform);
+  hex_id(device_id != NULL ? device_id : unknown_id, device);
+  const int length = snprintf(line, sizeof(line),
+      "%" PRId64 "\t%s\t%s\t%u\t%s\t%u\t%u\t%u\n",
+      now_ms(), platform, device, protocol, event, value, points, frames);
+  if (length < 0 || (size_t)length >= sizeof(line))
+    return false;
+  /* The main process and forked acquisition worker share this tmpfs journal.
+   * Serialize rotation as well as append; one write keeps each line intact. */
+  const int lock = open(EDGE_LOCAL_LOCK_PATH,
+                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (lock < 0)
+    return false;
+  if (flock(lock, LOCK_EX) != 0) {
+    (void)close(lock);
+    return false;
+  }
+  if ((unsigned long)file_size(EDGE_LOCAL_LOG_PATH) >= EDGE_LOCAL_LOG_MAX_BYTES)
+    rotate_local_logs();
+  const int fd = open(EDGE_LOCAL_LOG_PATH,
+                      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) {
+    (void)close(lock);
+    return false;
+  }
+  (void)fchmod(fd, 0600);
+  const bool written = write(fd, line, (size_t)length) == length;
+  (void)close(fd);
+  if ((unsigned long)file_size(EDGE_LOCAL_LOG_PATH) >= EDGE_LOCAL_LOG_MAX_BYTES)
+    rotate_local_logs();
+  (void)close(lock);
+  return written;
+}
+
+void edge_log_local_io(const uint8_t platform_id[16], const uint8_t device_id[16],
+                       unsigned protocol, const char *operation, unsigned result) {
+  const char *event = "io-other";
+  if (operation != NULL) {
+    if (strcmp(operation, "connect") == 0) event = "io-connect";
+    else if (strcmp(operation, "s7-cotp") == 0) event = "io-cotp";
+    else if (strcmp(operation, "s7-setup") == 0) event = "io-setup";
+    else if (strcmp(operation, "handshake") == 0) event = "io-handshake";
+    else if (strcmp(operation, "read") == 0) event = "io-read";
+  }
+  write_local_event(platform_id, device_id, protocol, event, result, 0U, 0U);
+}
+
+void edge_log_local_report(const uint8_t platform_id[16], const uint8_t device_id[16],
+                           unsigned protocol, edge_local_report_result result,
+                           unsigned points, unsigned frames) {
+  write_local_event(platform_id, device_id, protocol,
+                    result == EDGE_LOCAL_REPORT_QUEUED ? "report-queued" : "report-failed",
+                    (unsigned)result, points, frames);
+}
+
+void edge_log_local_config(const uint8_t platform_id[16], const uint8_t device_id[16],
+                           unsigned protocol, unsigned transport,
+                           unsigned scan_ms, unsigned report_sec) {
+  write_local_event(platform_id, device_id, protocol, "config-applied", scan_ms,
+                    report_sec, transport);
+}
+
+void edge_log_local_fault(const uint8_t platform_id[16], const uint8_t device_id[16],
+                          unsigned protocol, edge_local_fault fault, unsigned reason) {
+  static const char *const events[] = {
+      "invalid", "sample-incomplete", "sl651-frame", "sl651-buffer",
+      "sl651-report", "worker-encode", "worker-send", "parent-decode",
+      "parent-outbox", "outbox-corrupt", "outbox-send", "command-failed",
+      "network-failed", "config-failed", "outbox-evicted",
+      "protocol-decode", "capture-failed", "dtu-failed", "vpn-failed",
+      "firmware-failed", "modem-failed", "network-config-failed"};
+  if ((unsigned)fault == 0U || (unsigned)fault >= sizeof(events) / sizeof(events[0]))
+    return;
+  static const uint8_t unknown_id[16] = {0};
+  const uint8_t *platform = platform_id != NULL ? platform_id : unknown_id;
+  const uint8_t *device = device_id != NULL ? device_id : unknown_id;
+  const int64_t now = monotonic_ms();
+  if (now <= 0) {
+    (void)write_local_event(platform, device, protocol, events[(unsigned)fault],
+                            reason, 0U, 0U);
+    return;
+  }
+  for (unsigned index = 0U; index < EDGE_LOCAL_FAULT_CACHE_SIZE; ++index) {
+    local_fault_entry *entry = &local_faults[index];
+    if (entry->written_at_ms == 0 || entry->protocol != protocol ||
+        entry->fault != (unsigned)fault || entry->reason != reason ||
+        memcmp(entry->platform, platform, 16U) || memcmp(entry->device, device, 16U))
+      continue;
+    if (now >= entry->written_at_ms &&
+        now - entry->written_at_ms < EDGE_LOCAL_FAULT_REPEAT_MS)
+      return;
+    if (write_local_event(platform, device, protocol, events[(unsigned)fault],
+                          reason, 0U, 0U))
+      entry->written_at_ms = now;
+    return;
+  }
+  if (!write_local_event(platform, device, protocol, events[(unsigned)fault],
+                         reason, 0U, 0U))
+    return;
+  local_fault_entry *entry = &local_faults[next_local_fault++ % EDGE_LOCAL_FAULT_CACHE_SIZE];
+  memcpy(entry->platform, platform, 16U);
+  memcpy(entry->device, device, 16U);
+  entry->protocol = protocol;
+  entry->fault = (unsigned)fault;
+  entry->reason = reason;
+  entry->written_at_ms = now;
+}
+
+void edge_log_packet(const char *source, const char *direction,
+                     const char *device, const uint8_t *data, size_t size) {
+  if (!edge_log_enabled("debug") || data == NULL)
+    return;
+  char message[96];
+  snprintf(message, sizeof(message), "%s packet",
+           direction != NULL ? direction : "io");
+  char detail[160];
+  const int prefix = snprintf(
+      detail, sizeof(detail),
+      "device=%s bytes=%zu data=", device != NULL ? device : "unknown", size);
+  size_t offset =
+      prefix > 0 && (size_t)prefix < sizeof(detail) ? (size_t)prefix : 0U;
+  size_t emitted = 0U;
+  static const char digits[] = "0123456789abcdef";
+  for (size_t index = 0U; index < size && offset + 3U < sizeof(detail);
+       ++index) {
+    if (index != 0U)
+      detail[offset++] = ' ';
+    detail[offset++] = digits[data[index] >> 4U];
+    detail[offset++] = digits[data[index] & 0x0fU];
+    ++emitted;
+  }
+  if (offset + 4U < sizeof(detail) && emitted < size) {
+    detail[offset++] = ' ';
+    detail[offset++] = '.';
+    detail[offset++] = '.';
+    detail[offset++] = '.';
+  }
+  detail[offset < sizeof(detail) ? offset : sizeof(detail) - 1U] = '\0';
+  edge_log_write("debug", source, message, detail);
+}
+
+void edge_log_query(const iot_edge_v1_LogRequest *request,
+                    iot_edge_v1_LogResult *result) {
+  if (request == NULL || result == NULL)
+    return;
+  *result = (iot_edge_v1_LogResult)iot_edge_v1_LogResult_init_zero;
+  if (request->request_id.size == 16U)
+    edge_protocol_set_bytes(&result->request_id,
+                            sizeof(result->request_id.bytes),
+                            request->request_id.bytes, 16U);
+  result->success = true;
+  copy_text(result->message, sizeof(result->message), "ok");
+  if (!ensure_log_dir()) {
+    result->success = false;
+    copy_text(result->message, sizeof(result->message),
+              "log directory unavailable");
+    return;
+  }
+
+  const uint32_t limit =
+      request->limit == 0U || request->limit > EDGE_LOG_RESULT_LIMIT
+          ? EDGE_LOG_RESULT_LIMIT
+          : request->limit;
+  for (unsigned index = 0U;
+       index < EDGE_LOG_MAX_FILES && result->lines_count < limit; ++index) {
+    char path[128];
+    log_path(index, path, sizeof(path));
+    read_reverse_file(path, request, result, limit);
+  }
+}

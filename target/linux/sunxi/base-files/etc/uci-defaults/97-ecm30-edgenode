@@ -1,0 +1,49 @@
+#!/bin/sh
+
+[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = 'ebyte,ecm30' ] || exit 0
+[ -f /etc/config/edgenode ] || exit 0
+
+# These are board defaults; existing deployed platforms keep their own config.
+uci -q batch <<'EOF'
+set edgenode.modem.usb_vendor='2c7c'
+set edgenode.modem.usb_product='0901'
+set edgenode.modem.at_port='/dev/ttyUSB0'
+set edgenode.hardware.serial_port='/dev/ttyS1'
+set edgenode.hardware.serial_rs485='0'
+set edgenode.hardware.lan_interface='br-lan'
+set edgenode.hardware.wan_interface='usb0'
+commit edgenode
+EOF
+
+# EC200U uses runtime ECM dialing through the existing locked AT monitor.
+if [ -f /etc/config/4ginfo ]; then
+	uci -q batch <<'EOF'
+set 4ginfo.modem.at_port='/dev/ttyUSB0'
+set 4ginfo.modem.at_profile='generic'
+set 4ginfo.modem.network_interface='usb0'
+set 4ginfo.modem.power_control='none'
+set 4ginfo.modem.enabled='1'
+set 4ginfo.modem.quectel_ecm_auto_connect='1'
+commit 4ginfo
+EOF
+fi
+
+# Both physical ports are LAN; the EC200U supplies the routed uplink.
+if [ -f /etc/config/network ]; then
+	uci -q set network.wwan_4g.metric='20'
+	uci -q set network.wwan_4g.ipv6='0'
+	uci -q set network.wwan_4g.delegate='0'
+	uci -q delete network.wwan_4g6
+	uci -q commit network
+fi
+if [ -f /etc/config/firewall ]; then
+	for zone in $(uci -q show firewall | sed -n 's/^\(firewall\.[^.=]*\)=zone$/\1/p'); do
+		[ "$(uci -q get "$zone.name")" = 'wan' ] || continue
+		uci -q del_list "$zone.network=wwan_4g"
+		uci -q add_list "$zone.network=wwan_4g"
+	done
+	uci -q commit firewall
+fi
+[ -x /etc/init.d/4ginfo ] && /etc/init.d/4ginfo enable
+
+exit 0

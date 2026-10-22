@@ -1,0 +1,3 @@
+config watchdog 'main'
+	# RAM bring-up must remain available while network drivers are incomplete.
+	option reboot_on_offline '0'

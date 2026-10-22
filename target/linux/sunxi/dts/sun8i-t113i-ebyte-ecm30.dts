@@ -1,0 +1,250 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
+/dts-v1/;
+
+/* Keep the stock OP-TEE shared memory, OS and TA regions out of Linux. */
+/memreserve/ 0x41900000 0x00700000;
+
+#include "allwinner/sun8i-t113s.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+
+/ {
+	model = "Ebyte T113-I ECM30 (experimental RAM bring-up)";
+	compatible = "ebyte,ecm30", "allwinner,sun8i-t113s";
+
+	aliases {
+		ethernet0 = &emac;
+		serial0 = &uart0;
+		serial1 = &uart1;
+		serial2 = &uart2;
+		serial3 = &uart3;
+		serial4 = &uart4;
+		serial5 = &uart5;
+		watchdog0 = &external_wdt;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		/* Keep early UART output within the external watchdog boot window. */
+		bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 loglevel=3";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0x40000000 0x20000000>;
+	};
+
+	/* The stock boot chain provides PSCI through OP-TEE. */
+	psci {
+		compatible = "arm,psci-1.0";
+		method = "smc";
+	};
+
+	/* Match timer_arch in the live vendor DT: firmware does not set CNTVOFF. */
+	timer {
+		clock-frequency = <24000000>;
+		arm,cpu-registers-not-fw-configured;
+		arm,no-tick-in-suspend;
+	};
+
+	reg_3v3: regulator-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led-heartbeat {
+			label = "heartbeat";
+			gpios = <&pio 6 16 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "heartbeat";
+		};
+
+		led-user-base {
+			label = "user-base";
+			gpios = <&pio 6 11 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led-user-ext {
+			label = "user-ext";
+			gpios = <&pio 1 9 GPIO_ACTIVE_HIGH>;
+			default-state = "off";
+		};
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		key-user {
+			label = "User";
+			linux,code = <KEY_PROG1>;
+			gpios = <&pio 3 15 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	external_wdt: watchdog {
+		compatible = "linux,wdt-gpio";
+		gpios = <&pio 6 3 GPIO_ACTIVE_HIGH>;
+		hw_algo = "level";
+		hw_margin_ms = <1600>;
+		always-running;
+	};
+};
+
+&cpu0 {
+	enable-method = "psci";
+};
+
+&cpu1 {
+	enable-method = "psci";
+};
+
+/* The common SoC DTS leaves the external crystal frequency to the board. */
+&dcxo {
+	clock-frequency = <24000000>;
+};
+
+&pio {
+	vcc-pb-supply = <&reg_3v3>;
+	vcc-pc-supply = <&reg_3v3>;
+	vcc-pd-supply = <&reg_3v3>;
+	vcc-pe-supply = <&reg_3v3>;
+	vcc-pf-supply = <&reg_3v3>;
+	vcc-pg-supply = <&reg_3v3>;
+
+	uart0_pg_pins: uart0-pg-pins {
+		pins = "PG17", "PG18";
+		function = "uart0";
+		bias-pull-up;
+	};
+
+	uart2_pb_pins: uart2-pb-pins {
+		pins = "PB0", "PB1";
+		function = "uart2";
+		bias-pull-up;
+	};
+
+	uart3_pg_pins: uart3-pg-pins {
+		pins = "PG0", "PG1";
+		function = "uart3";
+		bias-pull-up;
+	};
+
+	uart4_pb_pins: uart4-pb-pins {
+		pins = "PB2", "PB3";
+		function = "uart4";
+		bias-pull-up;
+	};
+
+	uart5_pg_pins: uart5-pg-pins {
+		pins = "PG4", "PG5";
+		function = "uart5";
+		bias-pull-up;
+	};
+
+	/* PE7 is the observed PHY reset GPIO, not an RMII data signal. */
+	ecm30_rmii_pins: ecm30-rmii-pins {
+		pins = "PE0", "PE1", "PE2", "PE3", "PE4", "PE5", "PE6", "PE8", "PE9";
+		function = "emac";
+		drive-strength = <20>;
+	};
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pg_pins>;
+	status = "okay";
+};
+
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_pg6_pins>;
+	status = "okay";
+};
+
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2_pb_pins>;
+	status = "okay";
+};
+
+&uart3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart3_pg_pins>;
+	status = "okay";
+};
+
+&uart4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart4_pb_pins>;
+	status = "okay";
+};
+
+&uart5 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart5_pg_pins>;
+	status = "okay";
+};
+
+&emac {
+	pinctrl-names = "default";
+	pinctrl-0 = <&ecm30_rmii_pins>;
+	phy-handle = <&ext_rmii_phy>;
+	phy-mode = "rmii";
+	/* Stock tx-delay/rx-delay are one 100 ps hardware step each. */
+	allwinner,tx-delay-ps = <100>;
+	allwinner,rx-delay-ps = <100>;
+	phy-supply = <&reg_3v3>;
+	status = "okay";
+};
+
+&mdio {
+	/* Release PE7 before reading the PHY ID, including after a warm boot. */
+	reset-gpios = <&pio 4 7 GPIO_ACTIVE_LOW>;
+	/* Stock geth_phy_init() holds reset low/high for 50 ms each. */
+	reset-delay-us = <50000>;
+	reset-post-delay-us = <50000>;
+
+	/* Stock dmesg reports the active PHY at address 0, ID 937c4024. */
+	ext_rmii_phy: ethernet-phy@0 {
+		reg = <0>;
+		max-speed = <100>;
+		/* The PHY supplies the MAC's 50 MHz RMII reference. */
+		jlsemi,rmii-refclk-out;
+	};
+};
+
+&ehci1 {
+	status = "okay";
+};
+
+&ohci1 {
+	status = "okay";
+};
+
+&usbphy {
+	status = "okay";
+};
+
+/* Native NAND stays private; the driver registers a read-only AW logical view. */
+&spi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi0_pins>;
+	status = "okay";
+
+	nand0: nand@0 {
+		compatible = "ebyte,ecm30-aw-spinand-ro", "spi-nand";
+		reg = <0>;
+		spi-max-frequency = <20000000>;
+		spi-rx-bus-width = <1>;
+		spi-tx-bus-width = <1>;
+		nand-ecc-engine = <&nand0>;
+	};
+};
+
+/* MMC2 remains disabled; no writable storage or flash image is enabled. */

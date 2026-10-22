@@ -1,0 +1,1869 @@
+#define _GNU_SOURCE
+
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
+#include <signal.h>
+
+#include <uci.h>
+
+#define MODEM_LOCK "/tmp/4ginfo/modem.lock"
+#define DETAIL_DIR "/tmp/4ginfo"
+#define DETAIL_STATUS "/tmp/4ginfo/modem.status"
+#define DETAIL_STATUS_TMP "/tmp/4ginfo/modem.status.tmp"
+#define DETAIL_RAW "/tmp/4ginfo/modem.raw"
+#define AT_PORT_DEFAULT "/dev/ttyUSB2"
+#define AT_RESPONSE_SIZE 8192U
+#define AT_COMMAND_MAX 256U
+#define AT_TIMEOUT_MS 2500
+#define AT_OPTIONAL_TIMEOUT_MS 900
+#define SIM_RESCAN_GRACE_MS 15000
+#define SIM_RESCAN_COOLDOWN_MS 45000
+#define SIM_RESCAN_CFUN_OFF_MS 3000
+#define SIM_RESCAN_CFUN_ON_MS 5000
+
+struct modem_profile {
+	char port[128];
+	char at_profile[16];
+	char apn[101];
+	char pdp_type[16];
+	char auth_type[16];
+	char username[129];
+	char password[129];
+	char pin_code[9];
+	char radio_function[16];
+	char operator_mode[16];
+	char operator_mccmnc[8];
+	char network_interface[33];
+	char power_control[16];
+	char power_path[128];
+	bool automatic_apn;
+	bool redial_after_apply;
+	bool quectel_ecm_auto_connect;
+};
+
+struct at_result {
+	bool ok;
+	char response[AT_RESPONSE_SIZE];
+};
+
+struct probe_command {
+	const char *label;
+	const char *const *commands;
+	size_t command_count;
+	int timeout_ms;
+	bool required;
+};
+
+struct modem_at_profile {
+	const char *name;
+	const char *const *imei_commands;
+	size_t imei_command_count;
+	const char *const *iccid_commands;
+	size_t iccid_command_count;
+	const char *const *registration_commands;
+	size_t registration_command_count;
+	const char *const *signal_commands;
+	size_t signal_command_count;
+	const char *const *sim_commands;
+	size_t sim_command_count;
+	const char *const *apn_query_commands;
+	size_t apn_query_command_count;
+	bool uses_cstt;
+};
+
+#define ARRAY_SIZE(value) (sizeof(value) / sizeof((value)[0]))
+
+static const char *const at_generic_imei[] = {
+	"AT+GSN\r", "AT+CGSN\r"
+};
+static const char *const at_it692_imei[] = {
+	"AT+GSN\r", "AT+CGSN\r"
+};
+static const char *const at_it694_imei[] = {
+	"AT+GSN\r", "AT+CGSN\r"
+};
+
+static const char *const at_generic_iccid[] = {
+	"AT+ICCID\r", "AT+CCID\r", "AT+QCCID\r"
+};
+static const char *const at_it692_iccid[] = {
+	"AT+QCCID\r", "AT+ICCID\r", "AT+CCID\r"
+};
+static const char *const at_it694_iccid[] = {
+	"AT+ICCID\r", "AT+CCID\r", "AT+QCCID\r"
+};
+
+static const char *const at_registration[] = {
+	"AT+CEREG?\r", "AT+CREG?\r", "AT+CGREG?\r"
+};
+static const char *const at_generic_sim[] = {
+	"AT+CPIN?\r", "AT+CPIN\r"
+};
+static const char *const at_it692_sim[] = {
+	"AT+CPIN?\r", "AT+CPIN\r"
+};
+static const char *const at_it694_sim[] = {
+	"AT+CPIN\r", "AT+CPIN?\r"
+};
+static const char *const at_generic_apn_query[] = {
+	"AT+CGDCONT?\r"
+};
+static const char *const at_it692_apn_query[] = {
+	"AT+CGDCONT?\r"
+};
+static const char *const at_it694_apn_query[] = {
+	"AT+CSTT?\r", "AT+CGDCONT?\r"
+};
+static const char *const at_generic_signal[] = {
+	"AT+CSQ\r", "AT+CESQ\r", "AT+QCSQ\r"
+};
+static const char *const at_it692_signal[] = {
+	"AT+QCSQ\r", "AT+CSQ\r", "AT+CESQ\r"
+};
+static const char *const at_it694_signal[] = {
+	"AT+CSQ\r", "AT+CESQ\r", "AT+QCSQ\r"
+};
+static const struct modem_at_profile at_profiles[] = {
+	{
+		.name = "generic",
+		.imei_commands = at_generic_imei,
+		.imei_command_count = ARRAY_SIZE(at_generic_imei),
+		.iccid_commands = at_generic_iccid,
+		.iccid_command_count = ARRAY_SIZE(at_generic_iccid),
+		.registration_commands = at_registration,
+		.registration_command_count = ARRAY_SIZE(at_registration),
+		.signal_commands = at_generic_signal,
+		.signal_command_count = ARRAY_SIZE(at_generic_signal),
+		.sim_commands = at_generic_sim,
+		.sim_command_count = ARRAY_SIZE(at_generic_sim),
+		.apn_query_commands = at_generic_apn_query,
+		.apn_query_command_count = ARRAY_SIZE(at_generic_apn_query),
+		.uses_cstt = false
+	},
+	{
+		.name = "it692",
+		.imei_commands = at_it692_imei,
+		.imei_command_count = ARRAY_SIZE(at_it692_imei),
+		.iccid_commands = at_it692_iccid,
+		.iccid_command_count = ARRAY_SIZE(at_it692_iccid),
+		.registration_commands = at_registration,
+		.registration_command_count = ARRAY_SIZE(at_registration),
+		.signal_commands = at_it692_signal,
+		.signal_command_count = ARRAY_SIZE(at_it692_signal),
+		.sim_commands = at_it692_sim,
+		.sim_command_count = ARRAY_SIZE(at_it692_sim),
+		.apn_query_commands = at_it692_apn_query,
+		.apn_query_command_count = ARRAY_SIZE(at_it692_apn_query),
+		.uses_cstt = false
+	},
+	{
+		.name = "it694",
+		.imei_commands = at_it694_imei,
+		.imei_command_count = ARRAY_SIZE(at_it694_imei),
+		.iccid_commands = at_it694_iccid,
+		.iccid_command_count = ARRAY_SIZE(at_it694_iccid),
+		.registration_commands = at_registration,
+		.registration_command_count = ARRAY_SIZE(at_registration),
+		.signal_commands = at_it694_signal,
+		.signal_command_count = ARRAY_SIZE(at_it694_signal),
+		.sim_commands = at_it694_sim,
+		.sim_command_count = ARRAY_SIZE(at_it694_sim),
+		.apn_query_commands = at_it694_apn_query,
+		.apn_query_command_count = ARRAY_SIZE(at_it694_apn_query),
+		.uses_cstt = true
+	}
+};
+
+static const char *const at_basic[] = { "AT\r" };
+static const char *const at_manufacturer[] = { "AT+CGMI\r" };
+static const char *const at_model[] = { "AT+CGMM\r" };
+static const char *const at_firmware[] = { "AT+CGMR\r" };
+static const char *const at_imsi[] = { "AT+CIMI\r" };
+static const char *const at_operator[] = { "AT+COPS?\r" };
+static const char *const at_cgatt[] = { "AT+CGATT?\r" };
+static const char *const at_cgact[] = { "AT+CGACT?\r" };
+static const char *const at_cgpaddr[] = { "AT+CGPADDR=1\r" };
+static const char *const at_cgcontrdp[] = { "AT+CGCONTRDP\r" };
+
+static const struct modem_at_profile *find_at_profile(const char *name)
+{
+	size_t index;
+
+	for (index = 0U; index < ARRAY_SIZE(at_profiles); ++index)
+		if (strcmp(at_profiles[index].name, name) == 0)
+			return &at_profiles[index];
+	return &at_profiles[0];
+}
+
+static volatile sig_atomic_t monitor_stop;
+
+static int64_t monotonic_milliseconds(void)
+{
+	struct timespec value;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
+		return 0;
+
+	return (int64_t)value.tv_sec * 1000 + value.tv_nsec / 1000000;
+}
+
+static bool write_all(int fd, const char *data, size_t size)
+{
+	while (size != 0U) {
+		ssize_t written = write(fd, data, size);
+
+		if (written > 0) {
+			data += (size_t)written;
+			size -= (size_t)written;
+			continue;
+		}
+		if (written < 0 && errno == EINTR)
+			continue;
+		return false;
+	}
+
+	return true;
+}
+
+static bool configure_port(int fd, struct termios *original)
+{
+	struct termios value;
+
+	if (tcgetattr(fd, original) != 0)
+		return false;
+	value = *original;
+	value.c_iflag = IGNPAR;
+	value.c_oflag = 0;
+	value.c_lflag = 0;
+	value.c_cflag &= (tcflag_t)~(CSIZE | PARENB | CSTOPB);
+#ifdef CRTSCTS
+	value.c_cflag &= (tcflag_t)~CRTSCTS;
+#endif
+	value.c_cflag |= CS8 | CREAD | CLOCAL;
+	value.c_cc[VMIN] = 0;
+	value.c_cc[VTIME] = 0;
+	if (cfsetispeed(&value, B115200) != 0 || cfsetospeed(&value, B115200) != 0 ||
+		tcsetattr(fd, TCSANOW, &value) != 0)
+		return false;
+	tcflush(fd, TCIOFLUSH);
+	return true;
+}
+
+static int lock_modem(void)
+{
+	int lock;
+
+	if (mkdir(DETAIL_DIR, 0700) != 0 && errno != EEXIST)
+		return -1;
+	lock = open(MODEM_LOCK, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+	if (lock < 0 || flock(lock, LOCK_EX) != 0) {
+		if (lock >= 0)
+			close(lock);
+		return -1;
+	}
+	return lock;
+}
+
+static int final_response_state(const char *response)
+{
+	const char *cursor = response;
+
+	while (cursor != NULL && *cursor != '\0') {
+		const char *end = strchr(cursor, '\n');
+		size_t length = end != NULL ? (size_t)(end - cursor) : strlen(cursor);
+
+		while (length > 0U && (cursor[length - 1U] == '\r' || cursor[length - 1U] == ' ' ||
+			cursor[length - 1U] == '\t'))
+			--length;
+		while (length > 0U && (*cursor == ' ' || *cursor == '\t')) {
+			++cursor;
+			--length;
+		}
+		if (length == 2U && memcmp(cursor, "OK", 2U) == 0)
+			return 1;
+		if ((length >= 5U && memcmp(cursor, "ERROR", 5U) == 0) ||
+			(length >= 10U && memcmp(cursor, "+CME ERROR", 10U) == 0) ||
+			(length >= 10U && memcmp(cursor, "+CMS ERROR", 10U) == 0))
+			return -1;
+		if (end == NULL)
+			break;
+		cursor = end + 1;
+	}
+
+	return 0;
+}
+
+/* Every invocation is one AT transaction: one write, then one final response. */
+static bool run_at_command(int fd, const char *command, int timeout_ms,
+	struct at_result *result)
+{
+	int64_t deadline;
+	size_t used = 0U;
+
+	memset(result, 0, sizeof(*result));
+	(void)tcflush(fd, TCIFLUSH);
+	if (!write_all(fd, command, strlen(command)))
+		return false;
+	deadline = monotonic_milliseconds() + timeout_ms;
+	while (used + 1U < AT_RESPONSE_SIZE) {
+		struct pollfd poll_fd = { .fd = fd, .events = POLLIN };
+		int64_t remaining = deadline - monotonic_milliseconds();
+		int ready;
+		ssize_t count;
+
+		if (remaining <= 0)
+			break;
+		ready = poll(&poll_fd, 1, (int)remaining);
+		if (ready < 0 && errno == EINTR)
+			continue;
+		if (ready <= 0)
+			break;
+		count = read(fd, result->response + used, AT_RESPONSE_SIZE - used - 1U);
+		if (count > 0) {
+			used += (size_t)count;
+			result->response[used] = '\0';
+			if (final_response_state(result->response) != 0) {
+				result->ok = final_response_state(result->response) > 0;
+				return result->ok;
+			}
+			continue;
+		}
+		if (count < 0 && (errno == EINTR || errno == EAGAIN))
+			continue;
+		break;
+	}
+	return false;
+}
+
+static struct uci_section *find_section(struct uci_package *package, const char *name)
+{
+	struct uci_element *element;
+
+	uci_foreach_element(&package->sections, element) {
+		struct uci_section *section = uci_to_section(element);
+		if (strcmp(section->e.name, name) == 0)
+			return section;
+	}
+	return NULL;
+}
+
+static const char *option(struct uci_context *context, struct uci_section *section,
+	const char *name, const char *fallback)
+{
+	const char *value = section != NULL ? uci_lookup_option_string(context, section, name) : NULL;
+	return value != NULL ? value : fallback;
+}
+
+static bool copy_option(char *destination, size_t capacity, const char *value)
+{
+	size_t length = strlen(value);
+
+	if (length >= capacity)
+		return false;
+	memcpy(destination, value, length + 1U);
+	return true;
+}
+
+static bool load_profile(struct modem_profile *profile)
+{
+	struct uci_context *context = NULL;
+	struct uci_package *edgenode = NULL;
+	struct uci_package *four_g = NULL;
+	struct uci_section *edgenode_modem;
+	struct uci_section *four_g_modem;
+	bool success = false;
+
+	memset(profile, 0, sizeof(*profile));
+	if (!copy_option(profile->port, sizeof(profile->port), AT_PORT_DEFAULT) ||
+		!copy_option(profile->at_profile, sizeof(profile->at_profile), "generic") ||
+		!copy_option(profile->network_interface, sizeof(profile->network_interface), "usb0") ||
+		!copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4") ||
+		!copy_option(profile->auth_type, sizeof(profile->auth_type), "none") ||
+		!copy_option(profile->radio_function, sizeof(profile->radio_function), "full") ||
+		!copy_option(profile->operator_mode, sizeof(profile->operator_mode), "auto") ||
+		!copy_option(profile->power_control, sizeof(profile->power_control), "none") ||
+		!copy_option(profile->power_path, sizeof(profile->power_path), "/sys/class/gpio/modem_power/value"))
+		return false;
+	profile->automatic_apn = true;
+	context = uci_alloc_context();
+	if (context == NULL || uci_load(context, "edgenode", &edgenode) != UCI_OK ||
+		uci_load(context, "4ginfo", &four_g) != UCI_OK)
+		goto out;
+	edgenode_modem = find_section(edgenode, "modem");
+	four_g_modem = find_section(four_g, "modem");
+	if (!copy_option(profile->port, sizeof(profile->port),
+			option(context, four_g_modem, "at_port",
+			       option(context, edgenode_modem, "at_port", AT_PORT_DEFAULT))))
+		goto out;
+	if (!copy_option(profile->network_interface, sizeof(profile->network_interface),
+			option(context, four_g_modem, "network_interface", "usb0")))
+		goto out;
+	if (!copy_option(profile->at_profile, sizeof(profile->at_profile),
+			option(context, four_g_modem, "at_profile", "generic")))
+		goto out;
+	profile->automatic_apn = strcmp(option(context, four_g_modem, "automatic_apn", "1"), "0") != 0;
+	if (!copy_option(profile->apn, sizeof(profile->apn), option(context, four_g_modem, "apn", "")) ||
+		!copy_option(profile->pdp_type, sizeof(profile->pdp_type), option(context, four_g_modem, "pdp_type", "ipv4")) ||
+		!copy_option(profile->auth_type, sizeof(profile->auth_type), option(context, four_g_modem, "auth_type", "none")) ||
+		!copy_option(profile->username, sizeof(profile->username), option(context, four_g_modem, "username", "")) ||
+		!copy_option(profile->password, sizeof(profile->password), option(context, four_g_modem, "password", "")) ||
+		!copy_option(profile->pin_code, sizeof(profile->pin_code), option(context, four_g_modem, "pin_code", "")) ||
+		!copy_option(profile->radio_function, sizeof(profile->radio_function), option(context, four_g_modem, "radio_function", "full")) ||
+		!copy_option(profile->operator_mode, sizeof(profile->operator_mode), option(context, four_g_modem, "operator_mode", "auto")) ||
+		!copy_option(profile->operator_mccmnc, sizeof(profile->operator_mccmnc), option(context, four_g_modem, "operator_mccmnc", "")) ||
+		!copy_option(profile->power_control, sizeof(profile->power_control), option(context, four_g_modem, "power_control", "none")) ||
+		!copy_option(profile->power_path, sizeof(profile->power_path), option(context, four_g_modem, "power_path", "/sys/class/gpio/modem_power/value")))
+		goto out;
+	profile->redial_after_apply = strcmp(option(context, four_g_modem, "redial_after_apply", "0"), "0") != 0;
+	profile->quectel_ecm_auto_connect = strcmp(option(context, four_g_modem,
+		"quectel_ecm_auto_connect", "0"), "1") == 0;
+	success = true;
+out:
+	if (four_g != NULL)
+		uci_unload(context, four_g);
+	if (edgenode != NULL)
+		uci_unload(context, edgenode);
+	if (context != NULL)
+		uci_free_context(context);
+	return success;
+}
+
+static bool load_stdin_profile(struct modem_profile *profile)
+{
+	char line[256];
+	bool have_apn = false;
+	bool have_automatic_apn = false;
+	bool have_username = false;
+	bool have_password = false;
+	bool have_pdp_type = false;
+	bool have_auth_type = false;
+	bool have_pin_code = false;
+	bool have_redial = false;
+
+	while (fgets(line, sizeof(line), stdin) != NULL) {
+		char *separator;
+		char *value;
+		char *end = NULL;
+		unsigned long number;
+
+		line[strcspn(line, "\r\n")] = '\0';
+		separator = strchr(line, '=');
+		if (separator == NULL)
+			return false;
+		*separator++ = '\0';
+		value = separator;
+		if (strcmp(line, "apn") == 0) {
+			if (!copy_option(profile->apn, sizeof(profile->apn), value))
+				return false;
+			have_apn = true;
+		} else if (strcmp(line, "automatic_apn") == 0) {
+			if (strcmp(value, "0") == 0)
+				profile->automatic_apn = false;
+			else if (strcmp(value, "1") == 0)
+				profile->automatic_apn = true;
+			else
+				return false;
+			have_automatic_apn = true;
+		} else if (strcmp(line, "username") == 0) {
+			if (!copy_option(profile->username, sizeof(profile->username), value))
+				return false;
+			have_username = true;
+		} else if (strcmp(line, "password") == 0) {
+			if (!copy_option(profile->password, sizeof(profile->password), value))
+				return false;
+			have_password = true;
+		} else if (strcmp(line, "pdp_type") == 0) {
+			number = strtoul(value, &end, 10);
+			if (*value == '\0' || *end != '\0' || number < 1U || number > 3U)
+				return false;
+			if (number == 1U)
+				copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4");
+			else if (number == 2U)
+				copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv6");
+			else
+				copy_option(profile->pdp_type, sizeof(profile->pdp_type), "ipv4v6");
+			have_pdp_type = true;
+		} else if (strcmp(line, "auth_type") == 0) {
+			number = strtoul(value, &end, 10);
+			if (*value == '\0' || *end != '\0' || number < 1U || number > 4U)
+				return false;
+			if (number == 1U)
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "none");
+			else if (number == 2U)
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "pap");
+			else if (number == 3U)
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "chap");
+			else
+				copy_option(profile->auth_type, sizeof(profile->auth_type), "pap_or_chap");
+			have_auth_type = true;
+		} else if (strcmp(line, "pin_code") == 0) {
+			if (!copy_option(profile->pin_code, sizeof(profile->pin_code), value))
+				return false;
+			have_pin_code = true;
+		} else if (strcmp(line, "redial_after_apply") == 0) {
+			if (strcmp(value, "0") == 0)
+				profile->redial_after_apply = false;
+			else if (strcmp(value, "1") == 0)
+				profile->redial_after_apply = true;
+			else
+				return false;
+			have_redial = true;
+		} else {
+			return false;
+		}
+	}
+
+	return have_apn && have_automatic_apn && have_username && have_password &&
+		have_pdp_type && have_auth_type && have_pin_code && have_redial;
+}
+
+static bool valid_apn(const char *apn, bool allow_empty)
+{
+	size_t label_length = 0U;
+	const unsigned char *cursor;
+
+	if (apn == NULL || strlen(apn) > 100U)
+		return false;
+	if (*apn == '\0')
+		return allow_empty;
+	for (cursor = (const unsigned char *)apn; *cursor != '\0'; ++cursor) {
+		if (*cursor == '.') {
+			if (label_length == 0U || label_length > 63U || cursor[-1] == '-')
+				return false;
+			label_length = 0U;
+			continue;
+		}
+		if (!(isalnum(*cursor) || *cursor == '-'))
+			return false;
+		if (label_length == 0U && *cursor == '-')
+			return false;
+		++label_length;
+	}
+	return label_length != 0U && label_length <= 63U && apn[strlen(apn) - 1U] != '-';
+}
+
+static bool valid_pin(const char *pin)
+{
+	size_t length = strlen(pin);
+	const char *cursor;
+
+	if (length == 0U)
+		return true;
+	if (length < 4U || length > 8U)
+		return false;
+	for (cursor = pin; *cursor != '\0'; ++cursor)
+		if (!isdigit((unsigned char)*cursor))
+			return false;
+	return true;
+}
+
+static bool valid_credential(const char *value)
+{
+	const unsigned char *cursor;
+
+	for (cursor = (const unsigned char *)value; *cursor != '\0'; ++cursor)
+		if (*cursor < 0x20U || *cursor == 0x7fU || *cursor == '"')
+			return false;
+	return true;
+}
+
+static bool valid_digits(const char *value, size_t minimum, size_t maximum)
+{
+	size_t length = strlen(value);
+	const char *cursor;
+
+	if (length < minimum || length > maximum)
+		return false;
+	for (cursor = value; *cursor != '\0'; ++cursor)
+		if (!isdigit((unsigned char)*cursor))
+			return false;
+	return true;
+}
+
+static bool valid_imei(const char *value)
+{
+	unsigned sum = 0U;
+
+	if (!valid_digits(value, 15U, 15U))
+		return false;
+	for (size_t index = 0U; index < 15U; ++index) {
+		unsigned digit = (unsigned)(value[index] - '0');
+		if ((index & 1U) != 0U) {
+			digit *= 2U;
+			if (digit > 9U)
+				digit -= 9U;
+		}
+		sum += digit;
+	}
+	return (sum % 10U) == 0U;
+}
+
+static bool set_uci_option_if_changed(struct uci_context *context,
+	struct uci_package *package, struct uci_section *section, const char *name,
+	const char *value, bool *changed)
+{
+	const char *current = uci_lookup_option_string(context, section, name);
+	struct uci_ptr pointer = {
+		.p = package,
+		.s = section,
+		.option = name,
+		.value = value,
+	};
+
+	if (current != NULL && strcmp(current, value) == 0)
+		return true;
+	if (uci_set(context, &pointer) != UCI_OK)
+		return false;
+	*changed = true;
+	return true;
+}
+
+static bool sync_identity_from_status(void)
+{
+	char line[256];
+	char imei[32] = "";
+	char iccid[32] = "";
+	struct uci_context *context = NULL;
+	struct uci_package *package = NULL;
+	struct uci_section *node;
+	struct uci_section *modem;
+	FILE *status;
+	bool changed = false;
+	bool success = false;
+
+	status = fopen(DETAIL_STATUS, "r");
+	if (status == NULL)
+		return false;
+	while (fgets(line, sizeof(line), status) != NULL) {
+		line[strcspn(line, "\r\n")] = '\0';
+		if (strncmp(line, "imei=", 5U) == 0)
+			(void)copy_option(imei, sizeof(imei), line + 5U);
+		else if (strncmp(line, "iccid=", 6U) == 0)
+			(void)copy_option(iccid, sizeof(iccid), line + 6U);
+	}
+	fclose(status);
+	if (!valid_imei(imei))
+		return false;
+	if (!valid_digits(iccid, 18U, 22U))
+		iccid[0] = '\0';
+
+	context = uci_alloc_context();
+	if (context == NULL || uci_load(context, "edgenode", &package) != UCI_OK)
+		goto out;
+	node = find_section(package, "node");
+	modem = find_section(package, "modem");
+	if (node == NULL || modem == NULL ||
+		!set_uci_option_if_changed(context, package, node, "imei", imei, &changed) ||
+		!set_uci_option_if_changed(context, package, modem, "imei", imei, &changed))
+		goto out;
+	if (iccid[0] != '\0' &&
+		!set_uci_option_if_changed(context, package, modem, "iccid", iccid, &changed))
+		goto out;
+	if (changed && (uci_save(context, package) != UCI_OK ||
+		uci_commit(context, &package, false) != UCI_OK))
+		goto out;
+	success = true;
+out:
+	if (package != NULL)
+		uci_unload(context, package);
+	if (context != NULL)
+		uci_free_context(context);
+	return success;
+}
+
+static bool validate_profile(const struct modem_profile *profile)
+{
+	bool auth_none = strcmp(profile->auth_type, "none") == 0;
+	bool operator_auto = strcmp(profile->operator_mode, "auto") == 0;
+
+	if (strcmp(profile->pdp_type, "ipv4") != 0 && strcmp(profile->pdp_type, "ipv6") != 0 && strcmp(profile->pdp_type, "ipv4v6") != 0)
+		return false;
+	if (!auth_none && strcmp(profile->auth_type, "pap") != 0 && strcmp(profile->auth_type, "chap") != 0 && strcmp(profile->auth_type, "pap_or_chap") != 0)
+		return false;
+	if (strcmp(profile->radio_function, "full") != 0 && strcmp(profile->radio_function, "minimum") != 0 && strcmp(profile->radio_function, "offline") != 0)
+		return false;
+	if (!operator_auto && strcmp(profile->operator_mode, "manual") != 0)
+		return false;
+	if (!operator_auto && !valid_digits(profile->operator_mccmnc, 5U, 6U))
+		return false;
+	if (!valid_apn(profile->apn, profile->automatic_apn) ||
+		(profile->automatic_apn && profile->apn[0] != '\0') || (!profile->automatic_apn && profile->apn[0] == '\0') ||
+		!valid_pin(profile->pin_code) || !valid_credential(profile->username) || !valid_credential(profile->password))
+		return false;
+	if ((auth_none && (profile->username[0] != '\0' || profile->password[0] != '\0')) ||
+		(!auth_none && (profile->username[0] == '\0' || profile->password[0] == '\0')))
+		return false;
+	return profile->port[0] != '\0';
+}
+
+static unsigned auth_number(const char *auth_type)
+{
+	if (strcmp(auth_type, "pap") == 0)
+		return 1U;
+	if (strcmp(auth_type, "chap") == 0)
+		return 2U;
+	if (strcmp(auth_type, "pap_or_chap") == 0)
+		return 3U;
+	return 0U;
+}
+
+static const char *pdp_name(const char *pdp_type)
+{
+	if (strcmp(pdp_type, "ipv6") == 0)
+		return "IPV6";
+	if (strcmp(pdp_type, "ipv4v6") == 0)
+		return "IPV4V6";
+	return "IP";
+}
+
+static const char *radio_function_value(const char *radio_function)
+{
+	if (strcmp(radio_function, "minimum") == 0)
+		return "0";
+	if (strcmp(radio_function, "offline") == 0)
+		return "4";
+	return "1";
+}
+
+static void trim_copy(char *destination, size_t capacity, const char *value, size_t length)
+{
+	while (length > 0U && isspace((unsigned char)value[0])) {
+		++value;
+		--length;
+	}
+	while (length > 0U && isspace((unsigned char)value[length - 1U]))
+		--length;
+	if (length >= capacity)
+		length = capacity - 1U;
+	memcpy(destination, value, length);
+	destination[length] = '\0';
+}
+
+static bool value_after_prefix(const char *response, const char *prefix,
+	char *destination, size_t capacity)
+{
+	const char *start = strstr(response, prefix);
+	const char *end;
+
+	if (start == NULL)
+		return false;
+	start += strlen(prefix);
+	end = strpbrk(start, "\r\n");
+	trim_copy(destination, capacity, start, end != NULL ? (size_t)(end - start) : strlen(start));
+	return destination[0] != '\0';
+}
+
+static bool first_numeric_value(const char *response, char *destination, size_t capacity)
+{
+	const char *cursor = response;
+
+	while (cursor != NULL && *cursor != '\0') {
+		const char *end = strchr(cursor, '\n');
+		size_t length = end != NULL ? (size_t)(end - cursor) : strlen(cursor);
+		char value[64];
+
+		trim_copy(value, sizeof(value), cursor, length);
+		if (valid_digits(value, 1U, 32U)) {
+			(void)copy_option(destination, capacity, value);
+			return true;
+		}
+		if (end == NULL)
+			break;
+		cursor = end + 1;
+	}
+	return false;
+}
+
+static bool first_digits_value(const char *response, size_t minimum, size_t maximum,
+	char *destination, size_t capacity)
+{
+	const char *cursor = response;
+
+	while (cursor != NULL && *cursor != '\0') {
+		const char *start = cursor;
+		size_t length;
+
+		while (*start != '\0' && !isdigit((unsigned char)*start))
+			++start;
+		if (*start == '\0')
+			break;
+		cursor = start;
+		while (isdigit((unsigned char)*cursor))
+			++cursor;
+		length = (size_t)(cursor - start);
+		if (length >= minimum && length <= maximum && length < capacity) {
+			memcpy(destination, start, length);
+			destination[length] = '\0';
+			return true;
+		}
+	}
+	return false;
+}
+
+static void write_value(FILE *status, const char *key, const char *value);
+
+static const char *operator_from_plmn(const char *plmn)
+{
+	if (plmn == NULL)
+		return NULL;
+	if (strcmp(plmn, "46000") == 0 || strcmp(plmn, "46002") == 0 ||
+	    strcmp(plmn, "46004") == 0 || strcmp(plmn, "46007") == 0 ||
+	    strcmp(plmn, "46008") == 0 || strcmp(plmn, "46013") == 0)
+		return "中国移动";
+	if (strcmp(plmn, "46001") == 0 || strcmp(plmn, "46006") == 0 ||
+	    strcmp(plmn, "46009") == 0 || strcmp(plmn, "46010") == 0)
+		return "中国联通";
+	if (strcmp(plmn, "46003") == 0 || strcmp(plmn, "46005") == 0 ||
+	    strcmp(plmn, "46011") == 0 || strcmp(plmn, "46012") == 0)
+		return "中国电信";
+	if (strcmp(plmn, "46015") == 0)
+		return "中国广电";
+	return NULL;
+}
+
+static void write_mobile_operator(FILE *status, const char *name, int format)
+{
+	const char *mapped;
+
+	if (name == NULL || name[0] == '\0')
+		return;
+	if (format == 2 || valid_digits(name, 5U, 6U)) {
+		write_value(status, "operator_mccmnc", name);
+		mapped = operator_from_plmn(name);
+		write_value(status, "operator_name", mapped != NULL ? mapped : name);
+		write_value(status, "mobile_operator", mapped != NULL ? mapped : name);
+		return;
+	}
+	write_value(status, "operator_name", name);
+	write_value(status, "mobile_operator", name);
+}
+
+static void write_value(FILE *status, const char *key, const char *value)
+{
+	const char *cursor = value != NULL ? value : "";
+	char sanitized[1024];
+	size_t used = 0U;
+
+	while (*cursor != '\0' && used + 1U < sizeof(sanitized)) {
+		sanitized[used++] = (*cursor == '\r' || *cursor == '\n' || *cursor == '=') ? ' ' :
+			((unsigned char)*cursor < 0x20U || (unsigned char)*cursor == 0x7fU ? ' ' : *cursor);
+		++cursor;
+	}
+	sanitized[used] = '\0';
+	fprintf(status, "%s=%s\n", key, sanitized);
+}
+
+static void write_response_value(FILE *status, const char *key, const struct at_result *result)
+{
+	const char *cursor;
+	const char *start;
+	const char *end;
+	char value[1024];
+
+	if (!result->ok) {
+		write_value(status, key, "unsupported");
+		return;
+	}
+	start = result->response;
+	while (start != NULL && *start != '\0') {
+		end = strpbrk(start, "\r\n");
+		trim_copy(value, sizeof(value), start, end != NULL ? (size_t)(end - start) : strlen(start));
+		if (value[0] != '\0' && strcmp(value, "OK") != 0 && strncmp(value, "ERROR", 5U) != 0 &&
+			!(strncmp(value, "AT", 2U) == 0 && (value[2] == '\0' || value[2] == '+'))) {
+			write_value(status, key, value);
+			return;
+		}
+		cursor = end != NULL ? end + 1 : NULL;
+		start = cursor;
+	}
+	write_value(status, key, "unsupported");
+}
+
+static void parse_registration(FILE *status, const char *prefix, const char *response, const char *key)
+{
+	const char *value = strstr(response, prefix);
+	int mode = -1;
+	int registration = -1;
+	char area[32] = "";
+	char cell[32] = "";
+	int act = -1;
+	char number[32];
+
+	if (value == NULL || (sscanf(value, "%*[^:]: %d,%d,\"%31[^\"]\",\"%31[^\"]\",%d", &mode, &registration, area, cell, &act) < 2 &&
+		sscanf(value, "%*[^:]: %d,%d", &mode, &registration) < 2)) {
+		write_value(status, key, "unsupported");
+		return;
+	}
+	snprintf(number, sizeof(number), "%d", registration);
+	write_value(status, key, number);
+	if (strcmp(key, "registration_status") == 0 ||
+		strcmp(key, "cereg_status") == 0 || strcmp(key, "creg_status") == 0 ||
+		strcmp(key, "cgreg_status") == 0) {
+		write_value(status, "registration_status", number);
+		write_value(status, "registered", (registration == 1 || registration == 5) ? "1" : "0");
+	}
+	snprintf(number, sizeof(number), "%d", mode);
+	write_value(status, "registration_mode", number);
+	if (area[0] != '\0')
+		write_value(status, "location_area_code", area);
+	if (cell[0] != '\0')
+		write_value(status, "cell_id", cell);
+	if (act >= 0) {
+		snprintf(number, sizeof(number), "%d", act);
+		write_value(status, "registration_act", number);
+	}
+}
+
+static bool sim_absent_response(const char *response)
+{
+	return response != NULL &&
+		(strstr(response, "+CME ERROR: 10") != NULL ||
+		strstr(response, "+CME ERROR: 13") != NULL);
+}
+
+static void parse_probe_result(FILE *status, const char *label, const struct at_result *result)
+{
+	const char *value;
+	char text[256];
+	char number[32];
+	int first;
+	int second;
+
+	if (strcmp(label, "manufacturer") == 0) {
+		if (value_after_prefix(result->response, "+CGMI:", text, sizeof(text)))
+			write_value(status, "manufacturer", text);
+		else
+			write_response_value(status, "manufacturer", result);
+	} else if (strcmp(label, "model") == 0) {
+		if (value_after_prefix(result->response, "+CGMM:", text, sizeof(text)))
+			write_value(status, "model", text);
+		else
+			write_response_value(status, "model", result);
+	} else if (strcmp(label, "firmware") == 0) {
+		if (value_after_prefix(result->response, "+CGMR:", text, sizeof(text)))
+			write_value(status, "firmware", text);
+		else
+			write_response_value(status, "firmware", result);
+	} else if (strcmp(label, "imei") == 0 || strcmp(label, "imsi") == 0) {
+		if (first_numeric_value(result->response, text, sizeof(text))) {
+			write_value(status, label, text);
+			if (strcmp(label, "imsi") == 0 && strlen(text) >= 5U) {
+				char plmn[6];
+
+				memcpy(plmn, text, 5U);
+				plmn[5] = '\0';
+				write_mobile_operator(status, plmn, 2);
+			}
+		}
+	} else if (strcmp(label, "iccid") == 0) {
+		if (first_digits_value(result->response, 18U, 22U, text, sizeof(text)))
+			write_value(status, "iccid", text);
+		else
+			write_response_value(status, "iccid", result);
+	} else if (strcmp(label, "sim") == 0) {
+		if (sim_absent_response(result->response)) {
+			write_value(status, "sim_state_name", "NOT INSERTED");
+			write_value(status, "sim_state", "3");
+		} else if (value_after_prefix(result->response, "+CPIN:", text, sizeof(text))) {
+			const char *state = "1";
+
+			write_value(status, "sim_state_name", text);
+			if (strstr(text, "READY") != NULL)
+				state = "2";
+			else if (strstr(text, "NOT INSERTED") != NULL || strstr(text, "NOT READY") != NULL)
+				state = "3";
+			else if (strstr(text, "SIM PIN") != NULL)
+				state = "4";
+			else if (strstr(text, "SIM PUK") != NULL)
+				state = "5";
+			else if (strstr(text, "BLOCKED") != NULL)
+				state = "6";
+			write_value(status, "sim_state", state);
+		}
+	} else if (strcmp(label, "registration") == 0) {
+		if (strstr(result->response, "+CEREG:") != NULL)
+			parse_registration(status, "+CEREG:", result->response, "cereg_status");
+		else if (strstr(result->response, "+CREG:") != NULL)
+			parse_registration(status, "+CREG:", result->response, "creg_status");
+		else
+			parse_registration(status, "+CGREG:", result->response, "cgreg_status");
+	} else if (strcmp(label, "signal") == 0) {
+		value = strstr(result->response, "+CSQ:");
+		if (value != NULL && sscanf(value, "+CSQ: %d,%d", &first, &second) == 2) {
+			snprintf(number, sizeof(number), "%d", first);
+			write_value(status, "csq", number);
+			snprintf(number, sizeof(number), "%d", second);
+			write_value(status, "ber", number);
+			if (first >= 0 && first <= 31) {
+				snprintf(number, sizeof(number), "%d", -113 + first * 2);
+				write_value(status, "rssi_dbm", number);
+				snprintf(number, sizeof(number), "%d", first * 100 / 31);
+				write_value(status, "signal_percent", number);
+			}
+		} else if ((value = strstr(result->response, "+QCSQ:")) != NULL) {
+			char network[32] = "";
+			int rssi = -1;
+			int rsrp = -1;
+			int rsrq = -1;
+			int sinr = -1;
+
+			if (sscanf(value, "+QCSQ: \"%31[^\"]\",%d,%d,%d,%d", network, &rssi, &rsrp, &rsrq, &sinr) >= 2) {
+				write_value(status, "network_type", network);
+				snprintf(number, sizeof(number), "%d", rssi);
+				write_value(status, "qcsq_rssi", number);
+				snprintf(number, sizeof(number), "%d", rsrp);
+				write_value(status, "rsrp_dbm", number);
+				snprintf(number, sizeof(number), "%d", rsrq);
+				write_value(status, "rsrq_db", number);
+				snprintf(number, sizeof(number), "%d", sinr);
+				write_value(status, "sinr_db", number);
+			}
+		} else if ((value = strstr(result->response, "+CESQ:")) != NULL) {
+			int rxlev = -1;
+			int ber = -1;
+			int rsrq = -1;
+			int rsrp = -1;
+			int sinr = -1;
+
+			write_response_value(status, "cesq", result);
+			if (sscanf(value, "+CESQ: %d,%d,%d,%d,%d", &rxlev, &ber, &rsrq, &rsrp, &sinr) >= 2) {
+				if (rxlev >= 0 && rxlev <= 31) {
+					snprintf(number, sizeof(number), "%d", rxlev);
+					write_value(status, "csq", number);
+					snprintf(number, sizeof(number), "%d", -113 + rxlev * 2);
+					write_value(status, "rssi_dbm", number);
+					snprintf(number, sizeof(number), "%d", rxlev * 100 / 31);
+					write_value(status, "signal_percent", number);
+				}
+				if (rsrq >= 0 && rsrq <= 34) {
+					snprintf(number, sizeof(number), "%d", rsrq);
+					write_value(status, "cesq_rsrq", number);
+				}
+				if (rsrp >= 0 && rsrp <= 97) {
+					snprintf(number, sizeof(number), "%d", rsrp);
+					write_value(status, "cesq_rsrp", number);
+				}
+				if (sinr >= 0 && sinr <= 127) {
+					snprintf(number, sizeof(number), "%d", sinr);
+					write_value(status, "cesq_sinr", number);
+				}
+			}
+		}
+	} else if (strcmp(label, "network_info") == 0) {
+		value = strstr(result->response, "+QNWINFO:");
+		if (value != NULL) {
+			char mode[32] = "";
+			char plmn[32] = "";
+			char band[64] = "";
+			int channel = -1;
+			int parsed;
+
+			parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",\"%31[^\"]\",\"%63[^\"]\",%d", mode, plmn, band, &channel);
+			if (parsed < 3) {
+				char plmn_field[32] = "";
+
+				parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",%31[^,],\"%63[^\"]\",%d", mode, plmn_field, band, &channel);
+				trim_copy(plmn, sizeof(plmn), plmn_field, strlen(plmn_field));
+			}
+			if (parsed >= 3) {
+				write_value(status, "network_mode", mode);
+				write_value(status, "plmn", plmn);
+				write_value(status, "band", band);
+				if (channel >= 0) {
+					snprintf(number, sizeof(number), "%d", channel);
+					write_value(status, "channel", number);
+				}
+			}
+		}
+		write_response_value(status, "network_info_raw", result);
+	} else if (strcmp(label, "qnwinfo") == 0) {
+		value = strstr(result->response, "+QNWINFO:");
+		if (value != NULL) {
+			char mode[32] = "";
+			char plmn[32] = "";
+			char band[64] = "";
+			int channel = -1;
+			int parsed;
+
+			parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",\"%31[^\"]\",\"%63[^\"]\",%d", mode, plmn, band, &channel);
+			if (parsed < 3) {
+				char plmn_field[32] = "";
+
+				parsed = sscanf(value, "+QNWINFO: \"%31[^\"]\",%31[^,],\"%63[^\"]\",%d", mode, plmn_field, band, &channel);
+				trim_copy(plmn, sizeof(plmn), plmn_field, strlen(plmn_field));
+			}
+			if (parsed >= 3) {
+				write_value(status, "network_mode", mode);
+				write_value(status, "plmn", plmn);
+				write_value(status, "band", band);
+				if (channel >= 0) {
+					snprintf(number, sizeof(number), "%d", channel);
+					write_value(status, "channel", number);
+				}
+			}
+		}
+		write_response_value(status, "network_info_raw", result);
+	} else if (strcmp(label, "cops") == 0 || strcmp(label, "operator") == 0) {
+		value = strstr(result->response, "+COPS:");
+		if (value != NULL) {
+			int mode = -1;
+			int format = -1;
+			char name[96] = "";
+			char name_field[96] = "";
+			int act = -1;
+			int parsed;
+
+			parsed = sscanf(value, "+COPS: %d,%d,\"%95[^\"]\",%d", &mode, &format, name, &act);
+			if (parsed < 3) {
+				parsed = sscanf(value, "+COPS: %d,%d,%95[^,],%d", &mode, &format, name_field, &act);
+				trim_copy(name, sizeof(name), name_field, strlen(name_field));
+			}
+			if (parsed >= 2) {
+				snprintf(number, sizeof(number), "%d", mode);
+				write_value(status, "operator_selection_mode", number);
+				write_mobile_operator(status, name, format);
+				if (act >= 0) {
+					snprintf(number, sizeof(number), "%d", act);
+					write_value(status, "access_technology", number);
+				}
+			}
+		}
+	} else if (strcmp(label, "cgdcont") == 0) {
+		value = strstr(result->response, "+CGDCONT:");
+		if (value != NULL) {
+			char pdp[16] = "";
+			char apn[128] = "";
+			char address[128] = "";
+			int parsed;
+
+			parsed = sscanf(value, "+CGDCONT: %*d,\"%15[^\"]\",\"%127[^\"]\",\"%127[^\"]\"", pdp, apn, address);
+			if (parsed >= 1) {
+				write_value(status, "pdp_type", pdp);
+				if (parsed >= 2)
+					write_value(status, "apn", apn);
+				if (parsed >= 3 && address[0] != '\0')
+					write_value(status, "pdp_address", address);
+			}
+		}
+		write_response_value(status, "pdp_config", result);
+	} else if (strcmp(label, "cgpaddr") == 0) {
+		value = strstr(result->response, "+CGPADDR:");
+		if (value != NULL && sscanf(value, "+CGPADDR: %*d,\"%255[^\"]\"", text) == 1)
+			write_value(status, "pdp_address", text);
+	} else if (strcmp(label, "cfun") == 0) {
+		value = strstr(result->response, "+CFUN:");
+		if (value != NULL && sscanf(value, "+CFUN: %d", &first) == 1) {
+			snprintf(number, sizeof(number), "%d", first);
+			write_value(status, "radio_function", number);
+		}
+	} else if (strcmp(label, "cbc") == 0) {
+		value = strstr(result->response, "+CBC:");
+		int voltage = -1;
+
+		if (value != NULL && sscanf(value, "+CBC: %d,%d,%d", &first, &second, &voltage) >= 2) {
+			snprintf(number, sizeof(number), "%d", second);
+			write_value(status, "battery_percent", number);
+			if (voltage >= 0) {
+				snprintf(number, sizeof(number), "%d", voltage);
+				write_value(status, "battery_voltage_mv", number);
+			}
+		} else
+			write_response_value(status, "battery_status", result);
+	} else if (strcmp(label, "cnum") == 0) {
+		write_response_value(status, "msisdn", result);
+	} else if (strcmp(label, "cimi") == 0) {
+		if (first_numeric_value(result->response, text, sizeof(text)))
+			write_value(status, "imsi", text);
+	} else if (strcmp(label, "cgatt") == 0) {
+		if (value_after_prefix(result->response, "+CGATT:", text, sizeof(text)))
+			write_value(status, "packet_attached", text);
+	} else if (strcmp(label, "cgact") == 0) {
+		if (value_after_prefix(result->response, "+CGACT:", text, sizeof(text)))
+			write_value(status, "pdp_active", text);
+	} else if (strcmp(label, "qsimstat") == 0) {
+		write_response_value(status, "sim_presence", result);
+	} else if (strcmp(label, "qgps") == 0) {
+		write_response_value(status, "gps_status", result);
+	} else if (strcmp(label, "qgpsloc") == 0) {
+		write_response_value(status, "gps_location", result);
+	} else if (strcmp(label, "qcfg_mode") == 0) {
+		write_response_value(status, "preferred_mode", result);
+	} else if (strcmp(label, "qcfg_band") == 0) {
+		write_response_value(status, "preferred_band", result);
+	} else if (strcmp(label, "cgcontrdp") == 0) {
+		write_response_value(status, "cgcontrdp", result);
+	} else if (strcmp(label, "qiact") == 0) {
+		write_response_value(status, "qiact", result);
+	} else if (strcmp(label, "cgnapn") == 0) {
+		write_response_value(status, "cgnapn", result);
+	} else if (strcmp(label, "qca_info") == 0) {
+		write_response_value(status, "qca_info", result);
+	} else if (strcmp(label, "cpms") == 0) {
+		write_response_value(status, "cpms", result);
+	} else if (strcmp(label, "cscs") == 0) {
+		write_response_value(status, "cscs", result);
+	} else if (strcmp(label, "cmgf") == 0) {
+		write_response_value(status, "cmgf", result);
+	} else if (strcmp(label, "cnmi") == 0) {
+		write_response_value(status, "cnmi", result);
+	} else if (strcmp(label, "qeng_serving") == 0) {
+		write_response_value(status, "serving_cell", result);
+		value = strstr(result->response, "+QENG: \"servingcell\",");
+		if (value != NULL) {
+			char state[32] = "";
+			char rat[32] = "";
+			char duplex[16] = "";
+			char cell[32] = "";
+			int mcc = -1;
+			int mnc = -1;
+			int pci = -1;
+			int earfcn = -1;
+			int band = -1;
+			int ul_bandwidth = -1;
+			int dl_bandwidth = -1;
+			int tac = -1;
+			int rsrp = -1;
+			int rsrq = -1;
+			int rssi = -1;
+			int sinr = -1;
+			int parsed;
+
+			parsed = sscanf(value, "+QENG: \"servingcell\",\"%31[^\"]\",\"%31[^\"]\",\"%15[^\"]\",%d,%d,%31[^,],%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+				state, rat, duplex, &mcc, &mnc, cell, &pci, &earfcn, &band,
+				&ul_bandwidth, &dl_bandwidth, &tac, &rsrp, &rsrq, &rssi, &sinr);
+			if (parsed >= 6) {
+				write_value(status, "serving_state", state);
+				write_value(status, "serving_rat", rat);
+				write_value(status, "serving_duplex", duplex);
+				snprintf(number, sizeof(number), "%d", mcc);
+				write_value(status, "mcc", number);
+				snprintf(number, sizeof(number), "%d", mnc);
+				write_value(status, "mnc", number);
+				write_value(status, "cell_id", cell);
+			}
+			if (parsed >= 8) {
+				snprintf(number, sizeof(number), "%d", pci);
+				write_value(status, "pci", number);
+				snprintf(number, sizeof(number), "%d", earfcn);
+				write_value(status, "earfcn", number);
+			}
+			if (parsed >= 12) {
+				snprintf(number, sizeof(number), "%d", band);
+				write_value(status, "serving_band", number);
+				snprintf(number, sizeof(number), "%d", ul_bandwidth);
+				write_value(status, "uplink_bandwidth", number);
+				snprintf(number, sizeof(number), "%d", dl_bandwidth);
+				write_value(status, "downlink_bandwidth", number);
+				snprintf(number, sizeof(number), "%d", tac);
+				write_value(status, "tracking_area_code", number);
+			}
+			if (parsed >= 16) {
+				if (rsrp != -888) {
+					snprintf(number, sizeof(number), "%d", rsrp);
+					write_value(status, "rsrp_dbm", number);
+				}
+				snprintf(number, sizeof(number), "%d", rsrq);
+				write_value(status, "rsrq_db", number);
+				snprintf(number, sizeof(number), "%d", rssi);
+				write_value(status, "rssi_dbm", number);
+				snprintf(number, sizeof(number), "%d", sinr);
+				write_value(status, "sinr_db", number);
+			}
+		}
+	} else if (strcmp(label, "qeng_neighbour") == 0) {
+		write_response_value(status, "neighbour_cell", result);
+	} else if (strcmp(label, "qpref_mode") == 0) {
+		write_response_value(status, "preferred_mode", result);
+	}
+}
+
+static void write_network_state(FILE *status, const struct modem_profile *profile)
+{
+	struct ifaddrs *interfaces = NULL;
+	char address[INET_ADDRSTRLEN] = "";
+	bool connected = false;
+
+	if (getifaddrs(&interfaces) == 0) {
+		for (const struct ifaddrs *item = interfaces; item != NULL; item = item->ifa_next) {
+			const struct sockaddr_in *ipv4;
+
+			if (item->ifa_addr == NULL || item->ifa_addr->sa_family != AF_INET ||
+				strcmp(item->ifa_name, profile->network_interface) != 0)
+				continue;
+			ipv4 = (const struct sockaddr_in *)item->ifa_addr;
+			if (inet_ntop(AF_INET, &ipv4->sin_addr, address, sizeof(address)) != NULL) {
+				connected = true;
+				break;
+			}
+		}
+		freeifaddrs(interfaces);
+	}
+	write_value(status, "connected", connected ? "1" : "0");
+	write_value(status, "mobile_ipv4", address);
+}
+
+static void write_unavailable_status(const struct modem_profile *profile)
+{
+	const struct modem_at_profile *at_profile = find_at_profile(profile->at_profile);
+	FILE *status;
+
+	if (mkdir(DETAIL_DIR, 0700) != 0 && errno != EEXIST)
+		return;
+	status = fopen(DETAIL_STATUS_TMP, "w");
+	if (status == NULL)
+		return;
+	(void)chmod(DETAIL_STATUS_TMP, 0600);
+	write_value(status, "at_port", profile->port);
+	write_value(status, "at_profile", at_profile->name);
+	write_value(status, "available", "0");
+	write_value(status, "probe_ok", "0");
+	write_value(status, "registered", "0");
+	write_value(status, "registration_status", "-1");
+	write_value(status, "imei", "");
+	write_value(status, "iccid", "");
+	write_value(status, "csq", "99");
+	write_value(status, "rssi_dbm", "-1");
+	write_value(status, "signal_percent", "0");
+	write_value(status, "sim_state", "1");
+	write_value(status, "connected", "0");
+	write_value(status, "mobile_ipv4", "");
+	write_value(status, "updated_at", "0");
+	write_value(status, "raw_path", DETAIL_RAW);
+	if (fclose(status) == 0)
+		(void)rename(DETAIL_STATUS_TMP, DETAIL_STATUS);
+}
+
+static void add_probe_command(struct probe_command *commands, size_t capacity,
+	size_t *count, const char *label, const char *const *variants,
+	size_t variant_count, int timeout_ms, bool required)
+{
+	if (*count >= capacity || variants == NULL || variant_count == 0U)
+		return;
+	commands[*count].label = label;
+	commands[*count].commands = variants;
+	commands[*count].command_count = variant_count;
+	commands[*count].timeout_ms = timeout_ms;
+	commands[*count].required = required;
+	++*count;
+}
+
+static bool probe_modem(const struct modem_profile *profile, int fd)
+{
+	const struct modem_at_profile *at_profile = find_at_profile(profile->at_profile);
+	struct probe_command commands[16];
+	FILE *status = NULL;
+	FILE *raw = NULL;
+	bool base_ok = true;
+	size_t command_count = 0U;
+	size_t index;
+
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "at",
+		at_basic, ARRAY_SIZE(at_basic), AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "manufacturer",
+		at_manufacturer, ARRAY_SIZE(at_manufacturer), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "model",
+		at_model, ARRAY_SIZE(at_model), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "firmware",
+		at_firmware, ARRAY_SIZE(at_firmware), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "imei",
+		at_profile->imei_commands, at_profile->imei_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "imsi",
+		at_imsi, ARRAY_SIZE(at_imsi), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "iccid",
+		at_profile->iccid_commands, at_profile->iccid_command_count, AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "sim",
+		at_profile->sim_commands, at_profile->sim_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "registration",
+		at_profile->registration_commands, at_profile->registration_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "signal",
+		at_profile->signal_commands, at_profile->signal_command_count, AT_TIMEOUT_MS, true);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "operator",
+		at_operator, ARRAY_SIZE(at_operator), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "apn",
+		at_profile->apn_query_commands, at_profile->apn_query_command_count, AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgatt",
+		at_cgatt, ARRAY_SIZE(at_cgatt), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgact",
+		at_cgact, ARRAY_SIZE(at_cgact), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgpaddr",
+		at_cgpaddr, ARRAY_SIZE(at_cgpaddr), AT_OPTIONAL_TIMEOUT_MS, false);
+	add_probe_command(commands, ARRAY_SIZE(commands), &command_count, "cgcontrdp",
+		at_cgcontrdp, ARRAY_SIZE(at_cgcontrdp), AT_OPTIONAL_TIMEOUT_MS, false);
+
+	if (mkdir(DETAIL_DIR, 0700) != 0 && errno != EEXIST)
+		return false;
+	status = fopen(DETAIL_STATUS_TMP, "w");
+	raw = fopen(DETAIL_RAW ".tmp", "w");
+	if (status == NULL || raw == NULL)
+		goto fail;
+	(void)chmod(DETAIL_STATUS_TMP, 0600);
+	(void)chmod(DETAIL_RAW ".tmp", 0600);
+	write_value(status, "at_port", profile->port);
+	write_value(status, "at_profile", at_profile->name);
+	write_value(status, "registered", "0");
+	write_value(status, "registration_status", "-1");
+	write_value(status, "imei", "");
+	write_value(status, "iccid", "");
+	write_value(status, "csq", "99");
+	write_value(status, "rssi_dbm", "-1");
+	write_value(status, "signal_percent", "0");
+	write_value(status, "sim_state", "1");
+	write_network_state(status, profile);
+	write_value(status, "updated_at", "0");
+	fprintf(raw, "4G AT probe; one command per transaction\n\n");
+	for (index = 0U; index < command_count; ++index) {
+		struct at_result result;
+		const char *used_command = commands[index].commands[0];
+		bool command_ok = false;
+		size_t candidate;
+
+		for (candidate = 0U; candidate < commands[index].command_count; ++candidate) {
+			used_command = commands[index].commands[candidate];
+			if (run_at_command(fd, used_command, commands[index].timeout_ms, &result)) {
+				command_ok = true;
+				break;
+			}
+			if (strcmp(commands[index].label, "sim") == 0 && sim_absent_response(result.response))
+				break;
+		}
+		if (!command_ok) {
+			if (result.response[0] != '\0')
+				fprintf(raw, "[%s] %s\n%s\n", commands[index].label, used_command, result.response);
+			else
+				fprintf(raw, "[%s] %s\n<unsupported or timeout>\n\n", commands[index].label, used_command);
+			if (strcmp(commands[index].label, "sim") == 0 && result.response[0] != '\0')
+				parse_probe_result(status, commands[index].label, &result);
+			else
+				write_value(status, commands[index].label, "unsupported");
+			if (commands[index].required)
+				base_ok = false;
+			continue;
+		}
+		fprintf(raw, "[%s] %s\n%s\n", commands[index].label, used_command, result.response);
+		parse_probe_result(status, commands[index].label, &result);
+	}
+	{
+		char value[32];
+		snprintf(value, sizeof(value), "%ld", (long)time(NULL));
+		write_value(status, "updated_at", value);
+	}
+	write_value(status, "probe_ok", base_ok ? "1" : "0");
+	write_value(status, "available", base_ok ? "1" : "0");
+	write_value(status, "raw_path", DETAIL_RAW);
+	{
+		int status_rc = fclose(status);
+		int raw_rc = fclose(raw);
+
+		status = NULL;
+		raw = NULL;
+		if (status_rc != 0 || raw_rc != 0)
+			goto fail_closed;
+	}
+	if (rename(DETAIL_STATUS_TMP, DETAIL_STATUS) != 0 || rename(DETAIL_RAW ".tmp", DETAIL_RAW) != 0)
+		return false;
+	return base_ok;
+fail:
+	if (status != NULL)
+		fclose(status);
+	if (raw != NULL)
+		fclose(raw);
+fail_closed:
+	(void)unlink(DETAIL_STATUS_TMP);
+	(void)unlink(DETAIL_RAW ".tmp");
+	return false;
+}
+
+static unsigned cstt_auth_number(const char *auth_type)
+{
+	if (strcmp(auth_type, "pap") == 0)
+		return 2U;
+	if (strcmp(auth_type, "chap") == 0)
+		return 3U;
+	return 0U;
+}
+
+static bool execute_profile(const struct modem_profile *profile, int fd)
+{
+	const struct modem_at_profile *at_profile = find_at_profile(profile->at_profile);
+	struct at_result result;
+	char command[384];
+	unsigned auth;
+	bool apn_configured_with_cstt = false;
+
+	if (profile->pin_code[0] != '\0') {
+		snprintf(command, sizeof(command), "AT+CPIN=\"%s\"\r", profile->pin_code);
+		if (!run_at_command(fd, command, AT_TIMEOUT_MS, &result)) {
+			fprintf(stderr, "AT transaction failed at SIM PIN\n");
+			return false;
+		}
+	}
+	if (!profile->automatic_apn) {
+		if (at_profile->uses_cstt) {
+			if (strcmp(profile->auth_type, "pap_or_chap") == 0) {
+				fprintf(stderr, "IT-694 CSTT does not support PAP-or-CHAP authentication\n");
+				return false;
+			}
+			snprintf(command, sizeof(command), "AT+CSTT=\"%s\",\"%s\",\"%s\",%u\r",
+				profile->apn, profile->username, profile->password,
+				cstt_auth_number(profile->auth_type));
+			apn_configured_with_cstt = run_at_command(fd, command, AT_TIMEOUT_MS, &result);
+			if (!apn_configured_with_cstt)
+				snprintf(command, sizeof(command), "AT+CGDCONT=1,\"IP\",\"%s\"\r",
+					profile->apn);
+		} else {
+			snprintf(command, sizeof(command), "AT+CGDCONT=1,\"%s\",\"%s\"\r",
+				pdp_name(profile->pdp_type), profile->apn);
+		}
+		if ((!apn_configured_with_cstt && !run_at_command(fd, command, AT_TIMEOUT_MS, &result))) {
+			fprintf(stderr, "AT transaction failed at PDP/APN\n");
+			return false;
+		}
+	}
+	if (strcmp(profile->auth_type, "none") != 0 && !apn_configured_with_cstt) {
+		auth = auth_number(profile->auth_type);
+		snprintf(command, sizeof(command), "AT+CGAUTH=1,%u,\"%s\",\"%s\"\r", auth, profile->username, profile->password);
+		if (!run_at_command(fd, command, AT_TIMEOUT_MS, &result)) {
+			fprintf(stderr, "AT transaction failed at authentication\n");
+			return false;
+		}
+	}
+	if (strcmp(profile->operator_mode, "auto") == 0) {
+		if (!run_at_command(fd, "AT+COPS=0\r", AT_TIMEOUT_MS, &result)) {
+			fprintf(stderr, "AT transaction failed at automatic operator selection\n");
+			return false;
+		}
+	} else {
+		snprintf(command, sizeof(command), "AT+COPS=1,2,\"%s\"\r", profile->operator_mccmnc);
+		if (!run_at_command(fd, command, AT_TIMEOUT_MS, &result)) {
+			fprintf(stderr, "AT transaction failed at manual operator selection\n");
+			return false;
+		}
+	}
+	snprintf(command, sizeof(command), "AT+CFUN=%s\r", radio_function_value(profile->radio_function));
+	if (!run_at_command(fd, command, AT_TIMEOUT_MS, &result)) {
+		fprintf(stderr, "AT transaction failed at radio function\n");
+		return false;
+	}
+	if (profile->redial_after_apply && !run_at_command(fd, "AT+CFUN=1,1\r", AT_TIMEOUT_MS, &result)) {
+		fprintf(stderr, "AT transaction failed at modem redial\n");
+		return false;
+	}
+	return true;
+}
+
+static bool valid_custom_command(const char *command)
+{
+	size_t length = strlen(command);
+	const unsigned char *cursor;
+
+	if (length < 2U || length > AT_COMMAND_MAX || strncmp(command, "AT", 2U) != 0)
+		return false;
+	for (cursor = (const unsigned char *)command; *cursor != '\0'; ++cursor)
+		if (*cursor < 0x20U || *cursor == 0x7fU)
+			return false;
+	return true;
+}
+
+static bool interruptible_sleep_ms(int timeout_ms)
+{
+	int64_t deadline = monotonic_milliseconds() + timeout_ms;
+
+	while (!monitor_stop) {
+		struct timespec wait;
+		int64_t remaining = deadline - monotonic_milliseconds();
+
+		if (remaining <= 0)
+			return true;
+		if (remaining > 1000)
+			remaining = 1000;
+		wait.tv_sec = remaining / 1000;
+		wait.tv_nsec = (remaining % 1000) * 1000000L;
+		(void)nanosleep(&wait, NULL);
+	}
+	return false;
+}
+
+static bool read_status_last(const char *key, char *destination, size_t capacity)
+{
+	FILE *status = fopen(DETAIL_STATUS, "r");
+	char line[1024];
+	bool found = false;
+
+	if (destination == NULL || capacity == 0U)
+		return false;
+	destination[0] = '\0';
+	if (status == NULL)
+		return false;
+	while (fgets(line, sizeof(line), status) != NULL) {
+		char *separator = strchr(line, '=');
+		size_t key_length;
+
+		if (separator == NULL)
+			continue;
+		key_length = (size_t)(separator - line);
+		if (key_length != strlen(key) || memcmp(line, key, key_length) != 0)
+			continue;
+		trim_copy(destination, capacity, separator + 1, strlen(separator + 1));
+		found = true;
+	}
+	(void)fclose(status);
+	return found && destination[0] != '\0';
+}
+
+static bool sim_ready_status(void)
+{
+	char name[64];
+	char state[16];
+
+	if (read_status_last("sim_state_name", name, sizeof(name)) && strstr(name, "READY") != NULL)
+		return true;
+	return read_status_last("sim_state", state, sizeof(state)) && strcmp(state, "2") == 0;
+}
+
+static bool should_rescan_sim(void)
+{
+	char state[16];
+	char name[64];
+	char csq[16];
+
+	if (sim_ready_status())
+		return false;
+	if (read_status_last("sim_state", state, sizeof(state)) && strcmp(state, "3") == 0)
+		return true;
+	if (read_status_last("sim_state_name", name, sizeof(name)) &&
+		(strstr(name, "NOT INSERTED") != NULL || strstr(name, "NOT READY") != NULL))
+		return true;
+	return read_status_last("csq", csq, sizeof(csq)) && strcmp(csq, "99") == 0;
+}
+
+static void renew_mobile_lease(void)
+{
+	/* IT-694 assigns the PDP address to usb0; CFUN changes that address. */
+	(void)system("/sbin/ifup wwan_4g >/dev/null 2>&1");
+}
+
+static bool ensure_quectel_ecm_connection(int fd)
+{
+	struct at_result result;
+	const char *status;
+	int mode, cid, urc, connected;
+	int attached;
+
+	if (!run_at_command(fd, "AT+QNETDEVCTL?\r", AT_TIMEOUT_MS, &result))
+		return false;
+	status = strstr(result.response, "+QNETDEVCTL:");
+	if (status == NULL || sscanf(status, "+QNETDEVCTL: %d,%d,%d,%d",
+		&mode, &cid, &urc, &connected) != 4)
+		return false;
+	if (connected == 1)
+		return true;
+	if (connected != 0)
+		return false;
+	if (!run_at_command(fd, "AT+CGATT?\r", AT_TIMEOUT_MS, &result))
+		return false;
+	status = strstr(result.response, "+CGATT:");
+	if (status == NULL || sscanf(status, "+CGATT: %d", &attached) != 1 || attached != 1)
+		return false;
+
+	/* Mode 1 is a runtime connection: keep the modem's saved policy and APN. */
+	if (!run_at_command(fd, "AT+QNETDEVCTL=1,1,1\r", AT_TIMEOUT_MS, &result))
+		return false;
+	printf("Quectel ECM connection requested on PDP context 1\n");
+	fflush(stdout);
+	renew_mobile_lease();
+	return true;
+}
+
+static bool rescan_sim_cfun(int fd)
+{
+	struct at_result result;
+
+	if (!run_at_command(fd, "AT+CFUN=0\r", AT_TIMEOUT_MS, &result))
+		return false;
+	if (!interruptible_sleep_ms(SIM_RESCAN_CFUN_OFF_MS))
+		return false;
+	if (!run_at_command(fd, "AT+CFUN=1\r", AT_TIMEOUT_MS, &result))
+		return false;
+	(void)interruptible_sleep_ms(SIM_RESCAN_CFUN_ON_MS);
+	renew_mobile_lease();
+	return true;
+}
+
+static bool execute_command(const struct modem_profile *profile, const char *action,
+	const char *custom_command)
+{
+	struct termios original;
+	struct at_result result;
+	char command[AT_COMMAND_MAX + 2U];
+	int lock = -1;
+	int fd = -1;
+	bool success = false;
+
+	lock = lock_modem();
+	if (lock < 0) {
+		fprintf(stderr, "modem is busy\n");
+		return false;
+	}
+	fd = open(profile->port, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "cannot open modem AT port %s: %s\n", profile->port, strerror(errno));
+		if (strcmp(action, "probe") == 0)
+			write_unavailable_status(profile);
+		goto out;
+	}
+	if (!configure_port(fd, &original)) {
+		fprintf(stderr, "cannot configure modem AT port %s: %s\n", profile->port, strerror(errno));
+		if (strcmp(action, "probe") == 0)
+			write_unavailable_status(profile);
+		goto out;
+	}
+	if (strcmp(action, "probe") == 0) {
+		success = probe_modem(profile, fd);
+		/* A valid IMEI is useful even when an optional command is unsupported. */
+		(void)sync_identity_from_status();
+		printf(success ? "complete 4G probe succeeded on %s\n" : "4G probe completed with required AT failures on %s\n", profile->port);
+	} else if (strcmp(action, "ensure-ecm") == 0) {
+		success = ensure_quectel_ecm_connection(fd);
+	} else if (strcmp(action, "redial") == 0) {
+		success = run_at_command(fd, "AT+CFUN=1,1\r", AT_TIMEOUT_MS, &result);
+		if (success)
+			printf("modem reconnecting\n");
+	} else if (strcmp(action, "rescan-sim") == 0) {
+		success = rescan_sim_cfun(fd);
+		if (success)
+			printf("SIM rescan radio cycle completed on %s\n", profile->port);
+	} else if (strcmp(action, "at") == 0) {
+		snprintf(command, sizeof(command), "%s\r", custom_command);
+		success = run_at_command(fd, command, AT_TIMEOUT_MS, &result);
+		if (result.response[0] != '\0')
+			fputs(result.response, stdout);
+	} else {
+		success = execute_profile(profile, fd);
+		if (success)
+			printf(profile->redial_after_apply ? "mobile profile applied; modem reconnecting\n" : "mobile profile applied\n");
+	}
+	if (!success && strcmp(action, "probe") != 0 && strcmp(action, "rescan-sim") != 0)
+		fprintf(stderr, "modem rejected the requested command\n");
+out:
+	if (fd >= 0) {
+		tcsetattr(fd, TCSANOW, &original);
+		close(fd);
+	}
+	if (lock >= 0)
+		close(lock);
+	return success;
+}
+
+static void stop_monitor(int signal_number)
+{
+	(void)signal_number;
+	monitor_stop = 1;
+}
+
+static int monitor_modem(const struct modem_profile *profile, unsigned interval)
+{
+	int64_t last_rescan_ms = 0;
+	int64_t sim_missing_since_ms = 0;
+
+	monitor_stop = 0;
+	signal(SIGTERM, stop_monitor);
+	signal(SIGINT, stop_monitor);
+	signal(SIGHUP, stop_monitor);
+	if (interval == 0U || interval > 3600U)
+		interval = 30U;
+	while (!monitor_stop) {
+		int64_t now_ms;
+
+		(void)execute_command(profile, "probe", NULL);
+		now_ms = monotonic_milliseconds();
+		if (sim_ready_status()) {
+			sim_missing_since_ms = 0;
+			if (profile->quectel_ecm_auto_connect)
+				(void)execute_command(profile, "ensure-ecm", NULL);
+		} else if (should_rescan_sim()) {
+			if (sim_missing_since_ms == 0)
+				sim_missing_since_ms = now_ms;
+			if (now_ms - sim_missing_since_ms >= SIM_RESCAN_GRACE_MS &&
+				now_ms - last_rescan_ms >= SIM_RESCAN_COOLDOWN_MS) {
+				printf("SIM not ready on %s; cycling radio to rescan the card\n",
+					profile->port);
+				fflush(stdout);
+				last_rescan_ms = now_ms;
+				(void)execute_command(profile, "rescan-sim", NULL);
+				if (!monitor_stop)
+					(void)execute_command(profile, "probe", NULL);
+				if (sim_ready_status())
+					sim_missing_since_ms = 0;
+			}
+		} else {
+			sim_missing_since_ms = 0;
+		}
+		for (unsigned elapsed = 0U; elapsed < interval && !monitor_stop; ++elapsed)
+			sleep(1U);
+	}
+	return EXIT_SUCCESS;
+}
+
+int main(int argc, char **argv)
+{
+	struct modem_profile profile;
+	const char *action;
+	char *end = NULL;
+	unsigned long interval = 30U;
+
+	if (argc < 2 || (strcmp(argv[1], "probe") != 0 && strcmp(argv[1], "apply") != 0 &&
+		strcmp(argv[1], "apply-stdin") != 0 && strcmp(argv[1], "monitor") != 0 &&
+		strcmp(argv[1], "redial") != 0 && strcmp(argv[1], "at") != 0)) {
+		fprintf(stderr, "usage: %s probe|apply|apply-stdin|monitor [INTERVAL]|redial|at <AT command>\n", argv[0]);
+		return EXIT_FAILURE;
+	}
+	action = argv[1];
+	if (strcmp(action, "monitor") == 0) {
+		if (argc == 3) {
+			interval = strtoul(argv[2], &end, 10);
+			if (end == argv[2] || *end != '\0' || interval == 0U || interval > 3600U)
+				return EXIT_FAILURE;
+		} else if (argc != 2) {
+			return EXIT_FAILURE;
+		}
+	} else if (strcmp(action, "apply-stdin") == 0 && argc != 2) {
+		return EXIT_FAILURE;
+	}
+	if (strcmp(action, "at") == 0 && (argc != 3 || !valid_custom_command(argv[2]))) {
+		fprintf(stderr, "AT command must start with AT and contain no control characters\n");
+		return EXIT_FAILURE;
+	}
+	if (!load_profile(&profile)) {
+		fprintf(stderr, "cannot load 4G configuration\n");
+		return EXIT_FAILURE;
+	}
+	if (strcmp(action, "apply-stdin") == 0 && !load_stdin_profile(&profile)) {
+		fprintf(stderr, "invalid 4GINFO control request\n");
+		return EXIT_FAILURE;
+	}
+	if ((strcmp(action, "apply") == 0 || strcmp(action, "apply-stdin") == 0) &&
+		!validate_profile(&profile)) {
+		fprintf(stderr, "invalid 4G connection configuration\n");
+		return EXIT_FAILURE;
+	}
+	if (strcmp(action, "monitor") == 0)
+		return monitor_modem(&profile, (unsigned)interval);
+	if (strcmp(action, "apply-stdin") == 0)
+		action = "apply";
+	return execute_command(&profile, action, strcmp(action, "at") == 0 ? argv[2] : NULL) ? EXIT_SUCCESS : EXIT_FAILURE;
+}

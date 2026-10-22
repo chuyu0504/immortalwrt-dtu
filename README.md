@@ -2,6 +2,17 @@
 
 # Project ImmortalWrt
 
+This device tree is based on the official **ImmortalWrt v25.12.2** release
+(`4fc16f2985a358bd43bb522e43f05395fcbd6ed5`), using Linux 6.12.103.
+The official packages and LuCI feeds are pinned to the exact revisions shipped
+with that release. Do not update this tree from master.
+
+The TAS-682F / IT-694_s3 release seed is `configs/tastek-mt76x8.config`.
+The independent ECM30 RAM-only seed is `configs/ebyte-ecm30.config`; its earlier
+Linux 6.18 hardware test results do not establish Linux 6.12 hardware support.
+See [the migration notes](docs/immortalwrt-25.12.2.md) and [AGENTS.md](AGENTS.md)
+for the release workflow.
+
 ImmortalWrt is a fork of [OpenWrt](https://openwrt.org), with more packages ported, more devices supported, default optimized profiles and localization modifications for mainland China users.<br/>
 Compared to upstream, we allow to use (non-upstreamable) modifications/hacks to provide better feature/performance/support.
 
@@ -46,7 +57,8 @@ To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensi
       ```
 
   Note:
-  - Do everything as an unprivileged user, not root, without sudo.
+  - Builds may run as an unprivileged user or as root. For root builds, the top-level Makefile automatically exports `FORCE_UNSAFE_CONFIGURE=1` to host-tool configure scripts and recursive build commands. Other prerequisite checks remain enabled; `FORCE=1` is not required.
+  - Use one account consistently for a build checkout so generated files remain writable by that account.
   - Using CPUs based on other architectures should be fine to compile ImmortalWrt, but more hacks are needed - No warranty at all.
   - You must __not__ have spaces or non-ascii characters in PATH or in the work folders on the drive.
   - If you're using Windows Subsystem for Linux (or WSL), removing Windows folders from PATH is required, please see [Build system setup WSL](https://openwrt.org/docs/guide-developer/build-system/wsl) documentation.
@@ -54,11 +66,11 @@ To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensi
   - For more details, please see [Build system setup](https://openwrt.org/docs/guide-developer/build-system/install-buildsystem) documentation.
 
   ### Quickstart
-  1. Run `git clone -b <branch> --single-branch --filter=blob:none https://github.com/immortalwrt/immortalwrt` to clone the source code.
+  1. Run `git clone -b codex/immortalwrt-25.12.2 --single-branch --filter=blob:none https://github.com/hyird/immortalwrt-dtu.git` to clone this device tree.
   2. Run `cd immortalwrt` to enter source directory.
-  3. Run `./scripts/feeds update -a` to obtain all the latest package definitions defined in feeds.conf / feeds.conf.default
-  4. Run `./scripts/feeds install -a` to install symlinks for all obtained packages into package/feeds/
-  5. Run `make menuconfig` to select your preferred configuration for the toolchain, target system & firmware packages.
+  3. Run `./scripts/feeds update -a` to obtain the pinned official feeds.
+  4. Run `./scripts/install-tas-feeds.sh` to install the selected packages and their dependencies.
+  5. Run `cp configs/tastek-mt76x8.config .config && make defconfig` to select the TAS-682F and IT-694_s3 release profiles.
   6. Run `make` to build your firmware. This will download all sources, build the cross-compile toolchain and then cross-compile the GNU/Linux kernel & all chosen applications for your target system.
 
   ### Related Repositories

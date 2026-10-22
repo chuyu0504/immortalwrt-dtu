@@ -389,7 +389,6 @@ define KernelPackage/usb2
 	+TARGET_bcm47xx:kmod-usb-bcma \
 	+TARGET_bcm47xx:kmod-usb-ssb \
 	+TARGET_bcm53xx:kmod-usb-bcma \
-	+TARGET_bcm53xx:kmod-phy-bcm-ns-usb2 \
 	+TARGET_ath79:kmod-phy-ath79-usb \
 	+kmod-usb-ehci
   KCONFIG:=\
@@ -735,7 +734,6 @@ define KernelPackage/usb-serial-edgeport
   FILES:=$(LINUX_DIR)/drivers/usb/serial/io_edgeport.ko
   AUTOLOAD:=$(call AutoProbe,io_edgeport)
   $(call AddDepends/usb-serial)
-  DEPENDS+=+edgeport-firmware
 endef
 
 define KernelPackage/usb-serial-edgeport/description
@@ -1508,7 +1506,7 @@ $(eval $(call KernelPackage,usb-net-rtl8150))
 
 define KernelPackage/usb-net-rtl8152
   TITLE:=Kernel module for USB-to-Ethernet Realtek convertors
-  DEPENDS:=+r8152-firmware +kmod-crypto-sha256 +kmod-mii +kmod-libphy
+  DEPENDS:=+kmod-crypto-sha256 +kmod-mii +kmod-libphy
   KCONFIG:=CONFIG_USB_RTL8152
   FILES:=$(LINUX_DIR)/drivers/$(USBNET_DIR)/r8152.ko
   AUTOLOAD:=$(call AutoProbe,r8152)
@@ -1863,7 +1861,6 @@ define KernelPackage/usb3
 	+kmod-usb-xhci-hcd \
 	+TARGET_airoha_an7581:kmod-usb-xhci-mtk \
 	+TARGET_bcm53xx:kmod-usb-bcma \
-	+TARGET_bcm53xx:kmod-phy-bcm-ns-usb3 \
 	+TARGET_ramips_mt7621:kmod-usb-xhci-mtk \
 	+TARGET_econet_en751221:kmod-usb-xhci-mtk \
 	+TARGET_mediatek:kmod-usb-xhci-mtk
@@ -1984,4 +1981,3 @@ define KernelPackage/chaoskey/description
 endef
 
 $(eval $(call KernelPackage,chaoskey))
-

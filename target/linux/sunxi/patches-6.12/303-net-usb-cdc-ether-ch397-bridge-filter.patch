@@ -1,0 +1,111 @@
+Subject: [PATCH] net: usb: cdc_ether: program CH397 bridge receive filtering
+
+The ECM30's 1a86:5397 CH397 in CDC-ECM mode accepts its hardware MAC but
+ignores foreign unicast destinations even after a standard CDC promiscuous
+request. A bridge with a different MAC consequently loses unicast traffic.
+Follow WCH's vendor receive-filter register protocol for this exact USB ID,
+while retaining cdc_ether and its standard request. Preserve non-filter MAC
+configuration, use the vendor's firmware-dependent write command, and do
+not access OTP or saved configuration. Other USB devices are unchanged.
+
+Reference: WCH ch397_linux driver V1.5 (GPL-2.0-or-later):
+https://github.com/WCHSoftGroup/ch397_linux/blob/main/driver/ch397.c
+
+--- a/drivers/net/usb/cdc_ether.c
++++ b/drivers/net/usb/cdc_ether.c
+@@ -9,6 +9,7 @@
+ // #define	VERBOSE			// more; success messages
+ 
+ #include <linux/module.h>
++#include <linux/delay.h>
+ #include <linux/netdevice.h>
+ #include <linux/etherdevice.h>
+ #include <linux/ethtool.h>
+@@ -62,6 +63,68 @@
+ 	0xa3, 0x17, 0xa8, 0x8b, 0x04, 0x5e, 0x4f, 0x01,
+ 	0xa6, 0x07, 0xc0, 0xff, 0xcb, 0x7e, 0x39, 0x2a,
+ };
++
++/* CH397 firmware needs the vendor MAC filter as well as the CDC request.
++ * Register protocol and firmware split follow WCH's GPL ch397 driver.
++ */
++static bool cdc_is_ch397(struct usbnet *dev)
++{
++	return le16_to_cpu(dev->udev->descriptor.idVendor) == 0x1a86 &&
++	       le16_to_cpu(dev->udev->descriptor.idProduct) == 0x5397;
++}
++
++static void ch397_cdc_update_filter(struct usbnet *dev)
++{
++	u8 info[8];
++	__le32 value;
++	u32 cfg;
++	int ret;
++
++	/* WCH reapplies the MAC configuration 100 ms after link setup.
++	 * Recheck the live flags after this delay: bridge membership may have
++	 * changed while the earlier CDC control request was in flight.
++	 */
++	msleep(100);
++	ret = usbnet_read_cmd(dev, 0x10,
++		USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
++		0, 0, info, sizeof(info));
++	if (ret != sizeof(info))
++		goto failed;
++	ret = usbnet_read_cmd(dev, 0x11,
++		USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
++		0x0700, 0x4000, &value, sizeof(value));
++	if (ret != sizeof(value))
++		goto failed;
++
++	cfg = le32_to_cpu(value);
++	if (dev->net->flags & IFF_PROMISC) {
++		/* Receive all destinations, including other bridge members' MACs. */
++		cfg &= ~(BIT(22) | BIT(21) | BIT(20));
++		cfg |= BIT(19);
++	} else {
++		cfg &= ~(BIT(19) | BIT(20));
++		cfg |= BIT(22) | BIT(21);
++		if (!netdev_mc_empty(dev->net) || (dev->net->flags & IFF_ALLMULTI))
++			cfg |= BIT(20);
++	}
++	if (info[2] >= 0x37) {
++		ret = usbnet_write_cmd(dev, 0x1e,
++			USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
++			cfg & 0xffff, cfg >> 16, NULL, 0);
++		if (ret == 0)
++			return;
++	} else {
++		value = cpu_to_le32(cfg);
++		ret = usbnet_write_cmd(dev, 0x12,
++			USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
++			0x0700, 0x4000, &value, sizeof(value));
++		if (ret == sizeof(value))
++			return;
++	}
++failed:
++	netdev_warn(dev->net, "CH397 receive-filter update failed: %d\n",
++		    ret < 0 ? ret : -EIO);
++}
+ 
+ void usbnet_cdc_update_filter(struct usbnet *dev)
+ {
+@@ -89,6 +152,8 @@
+ 			0,
+ 			USB_CTRL_SET_TIMEOUT
+ 		);
++	if (cdc_is_ch397(dev))
++		ch397_cdc_update_filter(dev);
+ }
+ EXPORT_SYMBOL_GPL(usbnet_cdc_update_filter);
+ 
+@@ -420,6 +485,9 @@
+ 			  event->wValue ? "on" : "off");
+ 		if (netif_carrier_ok(dev->net) != !!event->wValue)
+ 			usbnet_link_change(dev, !!event->wValue, 0);
++		/* CH397 firmware restores its MAC filter while establishing link. */
++		if (event->wValue && cdc_is_ch397(dev))
++			usbnet_defer_kevent(dev, EVENT_SET_RX_MODE);
+ 		break;
+ 	case USB_CDC_NOTIFY_SPEED_CHANGE:	/* tx/rx rates */
+ 		netif_dbg(dev, timer, dev->net, "CDC: speed change (len %d)\n",
