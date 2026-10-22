@@ -81,9 +81,9 @@
   upgrades operate on UBI volumes within sys and require verified readback.
   First installation from the factory layout must use the same LuCI/sysupgrade
   path from the RAM recovery image; keep migration inside the NAND platform
-  hooks, retain non-system data, and never fall back to formatting sys.
-  Reclaim private/UDISK only when their original volume IDs, complete sizes
-  and hashes prove that they are empty; preserve either volume if it has data.
+  hooks, retain mbr/boot-resource/env/env-redund, and never fall back to
+  formatting sys. Remove the unused private/UDISK volumes during upgrade
+  and assign their space to rootfs_data, as explicitly requested by the user.
   Allocate 16 eraseblocks to the SquashFS rootfs (8 MiB NAND / 7.875 MiB UBI
   capacity); assign the remaining UBI space to rootfs_data. Shrinking the
   earlier 32/64-eraseblock allocations requires the RAM recovery upgrade path.

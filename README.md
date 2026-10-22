@@ -31,9 +31,8 @@ upload the ECM30 sysupgrade image under **System → Backup / Flash Firmware**.
 The standard sysupgrade path checks the factory UBI layout, creates the rootfs
 and overlay volumes, verifies the written kernel and rootfs, and reboots.
 Subsequent upgrades use the same page and image format. The factory bootloader,
-environment, private data and 8 KiB / 512 KiB NAND geometry are retained.
-The factory `private` and `UDISK` volumes are reclaimed for the overlay only
-when their complete contents and sizes match the known all-0xff empty volumes.
+environment and 8 KiB / 512 KiB NAND geometry are retained. The unused factory
+`private` and `UDISK` volumes are removed and their space goes to the overlay.
 The SquashFS volume occupies 16 eraseblocks (8 MiB of NAND, 7.875 MiB usable).
 The remaining UBI capacity is assigned to the UBIFS overlay. Migrating the
 earlier 32/64-eraseblock rootfs allocations also uses the RAM recovery image.

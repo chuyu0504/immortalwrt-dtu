@@ -146,26 +146,12 @@ ecm30_verify_volume() {
 	[ "${actual%% *}" = "$expected" ] || return 1
 }
 
-ecm30_reclaim_empty_volumes() {
-	local name volume expected actual
+ecm30_remove_unused_volumes() {
+	local name volume
 	for name in private UDISK; do
 		volume="$(nand_find_volume ubi0 "$name")"
-		# SHA-256 of the complete original volume filled with 0xff. The
-		# digest also fixes its length; never discard data on another board.
-		case "$name:$volume" in
-		private:ubi0_6)
-			expected=1d8e12e00c250138c0b81892d247492212001046c1d95cddf4563a61125181af
-			;;
-		UDISK:ubi0_7)
-			expected=132ed1c2328a15af97bc16de142a8f703d5c5f8263cfcb2e2eb979ff9db53fc9
-			;;
-		*) continue ;;
-		esac
-		[ "$(cat /sys/class/ubi/$volume/upd_marker)" = 0 ] || continue
-		[ "$(cat /sys/class/ubi/$volume/corrupted)" = 0 ] || continue
-		actual="$(sha256sum "/dev/$volume")"
-		[ "${actual%% *}" = "$expected" ] || continue
-		echo "Reclaiming empty $name volume for rootfs_data"
+		[ -n "$volume" ] || continue
+		echo "Removing unused $name volume for rootfs_data"
 		ubirmvol /dev/ubi0 -N "$name" || return 1
 	done
 	return 0
@@ -178,7 +164,7 @@ platform_do_upgrade() {
 	nand_upgrade_tar "$file" || return 1
 	ecm30_verify_volume "$file" "$ECM30_TAR_DIR/root" ubi0_5 || return 1
 	ecm30_verify_volume "$file" "$ECM30_TAR_DIR/kernel" ubi0_4 || return 1
-	ecm30_reclaim_empty_volumes || return 1
+	ecm30_remove_unused_volumes || return 1
 	# Rebuild the overlay and restore only the sysupgrade configuration backup,
 	# avoiding stale overlay binaries, as in the standard NAND updater.
 	ubirmvol /dev/ubi0 -N rootfs_data || return 1
