@@ -101,6 +101,7 @@ nand_upgrade_tar() {
 ecm30_verify_volume() {
     return 0
 }
+ecm30_reclaim_empty_volumes() { return 0; }
 ubirmvol() { echo "remove $*" >> "$LOG"; }
 ubimkvol() { echo "create $*" >> "$LOG"; }
 nand_do_upgrade_success() { echo success >> "$LOG"; }
@@ -287,6 +288,45 @@ ubiformat() { echo FORBIDDEN >> "$LOG"; }
         self.fixture(installed=True, root_lebs=48)
         result = self.run_shell('platform_check_image "$IMAGE"', self.layout_setup())
         self.assertNotEqual(result.returncode, 0)
+
+    def reclaim_setup(self, extra=''):
+        self.fixture(installed=True)
+        return self.layout_setup(r'''
+sha256sum() {
+    case "$1" in
+    /dev/ubi0_6) echo '1d8e12e00c250138c0b81892d247492212001046c1d95cddf4563a61125181af  /dev/ubi0_6' ;;
+    /dev/ubi0_7) echo '132ed1c2328a15af97bc16de142a8f703d5c5f8263cfcb2e2eb979ff9db53fc9  /dev/ubi0_7' ;;
+    esac
+}
+''' + extra)
+
+    def test_only_known_empty_volumes_are_reclaimed(self):
+        result = self.run_shell('ecm30_reclaim_empty_volumes', self.reclaim_setup())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines(), [
+            'remove /dev/ubi0 -N private', 'remove /dev/ubi0 -N UDISK'])
+
+    def test_private_volume_with_data_is_retained(self):
+        setup = self.reclaim_setup('sha256sum() { echo "not-the-empty-volume-hash  $1"; }')
+        result = self.run_shell('ecm30_reclaim_empty_volumes', setup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_unfinished_volume_is_retained(self):
+        setup = self.reclaim_setup()
+        (self.sys / 'class/ubi/ubi0_6/upd_marker').write_text('1\n')
+        (self.sys / 'class/ubi/ubi0_7/corrupted').write_text('1\n')
+        result = self.run_shell('ecm30_reclaim_empty_volumes', setup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_reclaim_failure_stops_upgrade(self):
+        setup = self.flow_setup().replace('ecm30_reclaim_empty_volumes() { return 0; }',
+                                        'ecm30_reclaim_empty_volumes() { return 1; }')
+        result = self.run_shell('platform_do_upgrade "$IMAGE"', setup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.log.read_text().splitlines(),
+                         ['unblock ubi0_5', 'write ubi0_5', 'write ubi0_4'])
 
 
 if __name__ == '__main__':
