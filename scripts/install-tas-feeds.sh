@@ -13,15 +13,22 @@ elif ! patch --dry-run --reverse -p1 -d feeds/packages < "$patch_file" >/dev/nul
     exit 1
 fi
 
-# 由 OpenWrt 标准 Prepare 阶段应用上游修复；遇到同名异内容补丁时拒绝覆盖。
+# 25.12.2 的 4.4.1 解析器已在用户回调前更新 inflater draining 状态。
+# 旧 4.5.8 回移修复针对重构后的函数，不应重复应用到发布版。
 backport_source="$PWD/scripts/libwebsockets-pmd-final.patch"
 backport_target="feeds/packages/libs/libwebsockets/patches/950-edgenode-pmd-final.patch"
-if [ -e "$backport_target" ] && ! cmp -s "$backport_source" "$backport_target"; then
-    echo "libwebsockets backport differs; review before replacing" >&2
+lws_version=$(sed -n 's/^PKG_VERSION:=//p' feeds/packages/libs/libwebsockets/Makefile)
+if [ "$lws_version" != 4.4.1 ]; then
+    echo "Expected the 25.12.2 libwebsockets 4.4.1; review parser compatibility before updating" >&2
     exit 1
 fi
-mkdir -p "$(dirname "$backport_target")"
-cp "$backport_source" "$backport_target"
+if [ -e "$backport_target" ]; then
+    if ! cmp -s "$backport_source" "$backport_target"; then
+        echo "libwebsockets backport differs; review before removing" >&2
+        exit 1
+    fi
+    rm "$backport_target"
+fi
 
 # The feeds helper scans the current package tree before installing a feed
 # source. Seed every in-tree/feed package referenced by a selected package,

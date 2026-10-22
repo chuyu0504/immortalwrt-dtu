@@ -167,9 +167,7 @@ The c8:94 entry may only probe through the dedicated read-only compatible.
  		     NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),
 --- a/drivers/mtd/nand/spi/Makefile
 +++ b/drivers/mtd/nand/spi/Makefile
-@@ -2,3 +2,6 @@
- spinand-objs := core.o alliancememory.o ato.o esmt.o foresee.o gigadevice.o macronix.o
- spinand-objs += micron.o paragon.o toshiba.o winbond.o xtx.o
+@@ -4 +4,4 @@
  obj-$(CONFIG_MTD_SPI_NAND) += spinand.o
 +
 +spinand-objs += aw-compat-ro.o

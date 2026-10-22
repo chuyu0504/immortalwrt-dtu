@@ -24,7 +24,9 @@ ECM30 继续只生成 RAM 启动产物。NAND 补丁适配 6.12 的 SPI-NAND API
 NAND 测试脚本从目标的内核版本文件读取版本及校验值。
 
 发布版 libwebsockets 为 4.4.1；继续启用 libev、zlib、permessage-deflate，
-并应用原有 inflater 完成状态回移。固件版本显示 25.12.2，revision 使用实际
+其解析器已在用户回调前设置 inflater 完成状态，无须原 4.5.8 的回移补丁。
+安装脚本检查版本，并仅清除内容与历史回移相同的残留补丁。固件版本显示
+25.12.2，revision 使用实际
 定制提交，避免误标为未经修改的官方二进制。
 
 ## 构建与验证

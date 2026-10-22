@@ -61,9 +61,11 @@
   `luci-proto-wireguard` with their dependencies.
   `scripts/libwebsockets-edgenode.patch` enables permessage-deflate, zlib and
   built-in libev in the official feed recipe without forking library sources.
-  `scripts/libwebsockets-pmd-final.patch` backports the upstream #3660 client
-  inflater completion fix through OpenWrt's standard package patch stage;
-  the helper pre-seeds required source packages to keep the feeds scan warning-free. Do not use `feeds install -a`; this targeted device tree
+  The release's libwebsockets 4.4.1 already sets client inflater completion
+  state before callbacks. Keep `scripts/libwebsockets-pmd-final.patch` as the
+  historical 4.5.8 backport; do not apply it to 4.4.1. The helper checks the
+  library version and pre-seeds required source packages to keep the feeds
+  scan warning-free. Do not use `feeds install -a`; this targeted device tree
   intentionally omits dependencies of unused feed packages.
 - Copy `configs/tastek-mt76x8.config` to `.config`, run `make defconfig`, and perform
   a full firmware image build; a package-only compile is not a release build.
