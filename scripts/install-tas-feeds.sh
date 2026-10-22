@@ -38,6 +38,7 @@ rm -rf package/feeds
 mkdir -p package/feeds/packages package/feeds/luci
 ln -s ../../../feeds/packages/libs/libev package/feeds/packages/libev
 ln -s ../../../feeds/packages/libs/libwebsockets package/feeds/packages/libwebsockets
+ln -s ../../../feeds/packages/libs/libuv package/feeds/packages/libuv
 ln -s ../../../feeds/packages/lang/lua/luasrcdiet package/feeds/packages/luasrcdiet
 ln -s ../../../feeds/luci/modules/luci-base package/feeds/luci/luci-base
 ln -s ../../../feeds/luci/libs/rpcd-mod-luci package/feeds/luci/rpcd-mod-luci
