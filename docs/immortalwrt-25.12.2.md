@@ -45,8 +45,9 @@ ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用r
 保持8 KiB逻辑页、512 KiB逻辑块和NAND写入拒绝；完整构建后重新验证4G和双网口。
 
 此前 ECM30 文档中的 6.18 硬件测试属于历史证据，不能视为 6.12 已通过实机
-验证。ECM30 的完整构建及离线产物检查已完成，结果见下节；TAS 联合发布
-构建和 ECM30 的 6.12 实机验证仍待完成。此次迁移不授权刷机或更换密钥。
+验证。ECM30 的完整构建、离线产物检查和本轮 RAM 功能验证已完成，结果见下节；
+TAS 联合发布构建及 ECM30 长时间稳定性验证仍待完成。此次迁移不授权刷机或
+更换密钥。
 
 ## 2026-10-22 本地验证结果
 
@@ -66,8 +67,8 @@ ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用r
 
 ## 2026-10-22 ECM30 完整构建及离线检查
 
-构建源码为 `c8e7bf5e2cfd9d2316c6ee45c62b790a7e9569e5`，固件报告
-`ImmortalWrt 25.12.2 r38146-c8e7bf5e2c`，内核为 `6.12.103`。
+构建源码为 `9059f835c6f9639c87131012501e8acbba1c500c`，固件报告
+`ImmortalWrt 25.12.2 r38149-9059f835c6`，内核为 `6.12.103`。
 构建机从干净工作树拉取已推送提交，按上述固定 feeds 和 ECM30 seed 构建。
 首次切换基线执行 `make dirclean`，重建 GCC 14.3.0、binutils 2.44 和 musl
 工具链；后续修正仅清理相应包，再完成全量镜像构建。
@@ -77,24 +78,24 @@ ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用r
 静态 `version`、`version.date`，使固件 revision 来自实际 Git 提交。
 最终完整构建退出状态为 0，PPP 2.5.2-r5 的 `pppoe.so` 已进入 rootfs。
 
-产物位于本地忽略目录 `artifacts/ebyte-t113i/ram-c8e7bf5e2c/`；完整归档为
-`artifacts/ebyte-t113i/ecm30-release-c8e7bf5e2c.tar.gz`。
+产物位于本地忽略目录 `artifacts/ebyte-t113i/ram-9059f835c6/`；完整归档为
+`artifacts/ebyte-t113i/ecm30-release-9059f835c6.tar.gz`。
 
 | 产物 | 字节数 | SHA-256 |
 | --- | ---: | --- |
-| `ecm30.uImage` | 9223372 | `fcdcff350a993fd04f7ee68abe889693ea6c96b3aceca3059491e22f46101156` |
+| `ecm30.uImage` | 9233348 | `dc1da4fdd6d19ec3c7da44a5ffb986ae08388c138fb5b7014e3f9c7578a64eae` |
 | `ecm30.dtb` | 19452 | `0a854c5a22b2bf1642570a61992a57ecdaf2ed721affdb126bad781121468047` |
-| `immortalwrt-sunxi-cortexa7-ebyte_ecm30-rootfs.tar.gz` | 5026307 | `0aedb4b2a83965c4c9597ba83acb53a4e4f3ea7c803ea461802938527a4bafa0` |
+| `immortalwrt-sunxi-cortexa7-ebyte_ecm30-rootfs.tar.gz` | 5026866 | `3feaf483000e1cb8191fdbabf25e46e3c482e64eae2248fbade8d40207e428a8` |
 
 完整归档 SHA-256：
-`5e138f317531cad52c53017d5bba34bd13ff4566e6c5b38295c5167736712a4d`。
+`a46863752ad4180ae9a5c465e3a0d57436f60672f352c2d5b0681e375dde9d62`。
 归档内 18 个文件的 SHA-256 全部通过；镜像、manifest、seed、最终构建配置、
 内核配置、feeds 版本、源码提交、构建日志及校验表一起保存。
 
 已拆解最终 rootfs 和 initramfs，并检查：
 
 - uImage 头及数据 CRC、独立 DTB 与附加 DTB 一致；加载和入口地址均为
-  `0x43000000`，解压后内核末端 `0x41425b30` 低于 OP-TEE 起点 `0x41900000`。
+  `0x43000000`，解压后内核末端 `0x41427bf0` 低于 OP-TEE 起点 `0x41900000`。
 - initramfs 含 1017 个条目，185 个 ARM ELF 的依赖均可解析；选中
   EdgeNode 0.3.70-r1、Telnet 客户端和服务端、tcpdump-mini、LuCI、UBI 工具。
 - 最终镜像保留 ECM30 PHY 时钟及复位补丁、CH397 自定义 MAC 接收修正、
@@ -103,16 +104,48 @@ ECM30单独使用 `configs/ebyte-ecm30.config`，只生成RAM启动及检查用r
   为 0600，没有发现内嵌私钥。未更换密钥或改变证书策略。
 - NAND 仍为 8192 字节逻辑页、524288 字节逻辑擦除块；保留写使能拦截、
   写入拒绝和禁用刷写的升级入口。
+- 最终内核配置内置 D1 pinctrl、D1/R CCU、GPIO watchdog 及早期注册选项，
+  并启用 6.12 所需的 RTC_CLASS、RTC_DRV_SUN6I 和 SUN6I_RTC_CCU。
 
 检查结果见同目录的 `verification.json`、`preflight-output.json` 和
 `release-sha256sums.txt`。
 
-## 实机验证状态：等待串口恢复
+## 2026-10-22 RAM 实机验证
 
-准备 RAM 启动时，Windows 已无法枚举调试串口，用户确认暂时无法重新连接。
-因此未执行这次 25.12.2 的 RAM 启动，也未重启或刷写板子。新内核的 4G
-自动拨号、公网访问、两个网口收发、自定义桥接 MAC 和 NAND 只读数据对照
-均仍待实测，不能使用上节离线检查代替。
+用户恢复 COM5 后，初版 `c8e7bf5e2c` 已尝试 RAM 启动：镜像和 DTB 的 RAM
+CRC 正确，Linux 6.12.103 开始执行，但在用户空间启动前复位，随后回到原厂
+Ubuntu。原厂 Ubuntu 的 rootfs 按原厂配置挂载为 rw；未执行镜像刷写命令。
+核对最终内核配置发现 D1 pinctrl 和 RTC 时钟依赖缺失。缺少 pinctrl 会使
+PG3 的 GPIO watchdog 无法探测；6.12 的 RTC CCU 由 rtc-sun6i 探测路径注册，
+还必须启用 RTC_CLASS 和 RTC_DRV_SUN6I。已在上述新构建中补齐这些选项，并
+显式关闭不适用的 CMOS 和旧 sun4i/sun7i RTC 驱动。
+
+`9059f835c6` 已完成全量构建、扩充后的产物检查及 RAM 实机验证：
+
+| 项目 | 实测结果 |
+| --- | --- |
+| 启动 | 实际运行 25.12.2 / 6.12.103，双核 online=0-1；物理架构定时器 24 MHz；D1 pinctrl 已探测 |
+| 4G | EC200U 开机请求 PDP 1 的临时 ECM 连接，DHCP 获得地址、路由和运营商 DNS；经 usb0 的公网 ping 3/3、DNS 解析及 HTTP 204 请求通过 |
+| 4G 恢复 | 临时执行 QNETDEVCTL=0 后，35 秒检查已自动重拨，QNETDEVCTL 返回 1,1,1,1，公网 ping 再次 3/3；监控实例运行且保留 procd respawn |
+| eth0 | 原生 JLSemi PHY，100 Mbps 全双工；默认 MAC 和桥接 MAC 02:11:22:33:44:66 时电脑 ping 均 4/4，HTTP 有响应；连续四次关闭重开均返回 0 |
+| eth1 | USB CH397 / cdc_ether，100 Mbps；桥接 MAC 分别为 02:11:22:33:44:66、02:11:22:33:44:55 时电脑 ping 均 4/4，HTTP 有响应；关闭重开后正常 |
+| NAND | 四个 MTD 分区 flags 均为 0；sys 为 8192 字节页、524288 字节块、256 字节 OOB；1004 个逻辑块中仅 235 为坏块，UBI 无损坏块、8 个卷、ro_mode=1 |
+| 数据对照 | 10 组块首/尾样本无差异；boot 卷完整哈希及 rootfs 首 4096 字节哈希均与原厂基线一致，UBIFS 只读挂载可读 |
+
+USB CDC 的通用链路查询只填速率，不填 duplex 字段，因此本轮不以 sysfs
+显示的 half 作为 CH397 的物理双工结论。HTTP 管理接口的未认证请求返回
+403，本轮确认了 TCP/HTTP 收发，未更改管理凭据。
+
+最终检查时本次 RAM 启动已连续运行 533 秒，未发现新的 Oops、panic、PHY
+复位超时；这属于短时功能测试，不代表已经完成长时间稳定性或吞吐压力测试。
+检查结束已卸载测试用 UBIFS 并分离 UBI。最终系统根目录和 /tmp 均为 tmpfs，
+4G 已恢复联网，电脑线缆留在 eth1，桥接 MAC 为 02:11:22:33:44:55。
+仅验证板子自身联网，未修改电脑网关或 DNS，未测试电脑经 4G 转发上网。
+
+本轮原始日志及 `readonly-verification.json` 保存在
+`artifacts/ebyte-t113i/ram-9059f835c6/`，包括启动、4G 自动连接及断线恢复、
+两口自定义 MAC、NAND 基线对照及最终运行状态；测试没有刷写 NAND 或保存
+U-Boot 环境。原厂 boot 卷及 rootfs 超级块哈希见下节，两次内核复核结果相同。
 
 构建期间在仍运行的旧 `6.18.44` RAM 系统完成了一次 NAND 只读基线复核：
 sys 分区 1004 个逻辑擦除块，仅块 235 标记为坏块；10 组块首、块尾样本
@@ -124,9 +157,24 @@ rootfs 首 4096 字节 SHA-256 为
 日志位于 `artifacts/ebyte-t113i/25.12.2-prebuild/`。验证后已卸载 UBIFS 并
 分离 UBI；这些结论仅对应旧内核。
 
-准备验证新固件自动拨号时，旧 RAM 系统的 `4ginfo` 服务已停止，并执行临时
-`AT+QNETDEVCTL=0` 断开数据连接。串口随后不可用，LAN 管理接口也未能登录，
-因此尚未恢复 4G。可通过已有管理凭据在 LuCI「系统 → 启动项」启动
-`4ginfo`，或在控制台执行 `/etc/init.d/4ginfo start`。
-串口恢复后，先确认当前系统状态，再用已校验产物执行 RAM 启动和实测；
-保持 NAND 只读，不执行 erase、write、saveenv 或 sysupgrade。
+串口断开前临时停止旧 RAM 系统 4G 的状态已由本轮新系统联网及重拨测试解决。
+所有自定义内核的 NAND 测试保持只读，没有执行 erase、write、saveenv 或
+sysupgrade。当前产物只用于 RAM 验证，NAND 驱动仍不提供写入能力。
+
+## 后续顺序：先从 NAND 自动启动
+
+用户在本轮 RAM 验证后明确要求优先实际落盘，并选择「先从 NAND 自动启动
+ImmortalWrt，配置持久化随后做」。下一阶段先备份原厂 boot 卷，对照原厂
+Android boot image v2 格式准备启动镜像，并在 RAM 验证同一镜像及原厂启动
+参数后，仅更新 boot 卷。保留 boot0、U-Boot、OP-TEE、安全存储、环境及原厂
+rootfs；继续提供串口 RAM 恢复入口。该阶段根文件系统仍来自 initramfs，
+因此 /etc/config 的修改不会断电保存。
+
+后续持久化按 OverlayFS 设计：SquashFS rootfs 作为只读下层，UBIFS
+rootfs_data 作为可写上层。需要补齐 UBI block 支持和经过验证的 NAND 写路径，
+再调整 sys 内的 UBI 卷；无需为了这个方案改动前面的启动及安全存储分区。
+在现有只读驱动上不能直接创建或写入 rootfs_data。
+
+长期联网及稳定性、吞吐压力，以及 RS485/串口、CAN、DI/DO 等工业接口验证
+随后按用途安排。原厂 auto_test 作为接线和行为参考，不直接运行会切换网络
+或输出状态的脚本。
