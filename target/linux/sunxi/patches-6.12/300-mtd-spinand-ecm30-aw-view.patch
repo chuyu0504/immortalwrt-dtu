@@ -47,7 +47,7 @@ boot0, U-Boot and secure storage remain protected.
 +		return -EROFS;
 +	if (einfo->addr < 10 * 1024 * 1024 ||
 +	    einfo->addr >= mtd->size || einfo->len != mtd->erasesize ||
-+	    einfo->addr % mtd->erasesize)
++	    (einfo->addr & (mtd->erasesize - 1)))
 +		return -EINVAL;
 +	mutex_lock(&spinand->lock);
 +	nanddev_offs_to_pos(nand, einfo->addr, &pos);
