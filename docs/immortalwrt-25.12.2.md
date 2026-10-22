@@ -40,3 +40,20 @@ NAND 测试脚本从目标的内核版本文件读取版本及校验值。
 此前 ECM30 文档中的 6.18 硬件测试属于历史证据，不能视为 6.12 已通过实机
 验证。完整固件、最终 rootfs、ELF 依赖、镜像大小与 SHA-256 仍需在正式构建后
 验证。此次迁移不授权刷机或更换密钥。
+
+## 2026-10-22 本地验证结果
+
+- EdgeNode 主机回归：24 项全部通过；应用源码与 `06455bc6c9` 完全相同。
+- libwebsockets 4.4.1 使用 mbedTLS、libev 和 zlib 构建；真实 WebSocket
+  线帧测试通过，覆盖普通传输、压缩及上下文复用。该测试不代表 HTTPS 证书实测。
+- Linux 6.12.103 的 ECM30 NAND KUnit：9 项全部通过，包括写入拒绝；
+  使用原版内核加本项目补丁，在 UML 中运行。
+- 官方通用补丁及 ramips、sunxi 目标补丁应用通过，不依赖 fuzz。
+- TAS-682F、IT-694_s3、ECM30 的设备树均通过预处理及 dtc 编译。
+- TAS 联合发布配置与 ECM30 RAM 配置均通过 `make defconfig`，最终扫描无警告。
+  保留官方 linux-firmware 包定义、预置 libuv 源码入口用于解析未选中驱动的
+  依赖；没有因此在设备配置中启用这些固件或 libuv。
+
+日志保存在迁移工作区的 `build_dir/migration-validation/`。构建机
+`10.10.0.101` 当时对 root 和 openwrtbuild 的 SSH 连接均直接关闭，未执行
+完整发布构建或设备刷写。正式发布前仍须补齐上节的产物与实机验证。
