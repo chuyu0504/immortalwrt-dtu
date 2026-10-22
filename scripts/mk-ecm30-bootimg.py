@@ -15,7 +15,9 @@ import zlib
 
 
 PAGE_SIZE = 2048
-KERNEL_ADDRESS = 0x43000000
+UIMAGE_KERNEL_ADDRESS = 0x43000000
+STOCK_STAGING_ADDRESS = 0x43000000
+KERNEL_ADDRESS = 0x45000000
 DTB_ADDRESS = 0x4F000000
 BOOT_VOLUME_BYTES = 33 * 516096
 CMDLINE = ("console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 "
@@ -41,7 +43,7 @@ def unpack_uimage(data, dtb):
     require(header[3] == len(data) - 64, "uImage data length mismatch")
     payload = data[64:]
     require(zlib.crc32(payload) == header[6], "uImage data CRC mismatch")
-    require(header[4:6] == (KERNEL_ADDRESS, KERNEL_ADDRESS),
+    require(header[4:6] == (UIMAGE_KERNEL_ADDRESS, UIMAGE_KERNEL_ADDRESS),
             "unexpected kernel load/entry address")
     require(header[7:11] == (5, 2, 2, 0), "expected Linux ARM kernel, no outer compression")
     require(len(dtb) >= 40 and dtb[:4] == b"\xd0\x0d\xfe\xed", "invalid DTB magic")
@@ -70,6 +72,8 @@ def build_image(uimage, dtb):
         0, 0, ANDROID_V2.size, len(dtb), DTB_ADDRESS)
     image = padded(header) + padded(kernel) + padded(dtb)
     require(len(image) <= BOOT_VOLUME_BYTES, "image exceeds the factory boot volume")
+    require(KERNEL_ADDRESS >= STOCK_STAGING_ADDRESS + len(image),
+            "kernel load overlaps the stock boot image staging region")
     report = {
         "format": "Android boot image v2",
         "header_bytes": ANDROID_V2.size,
@@ -80,6 +84,7 @@ def build_image(uimage, dtb):
         "kernel_bytes": len(kernel),
         "kernel_sha256": hashlib.sha256(kernel).hexdigest(),
         "kernel_address": hex(KERNEL_ADDRESS),
+        "stock_staging_address": hex(STOCK_STAGING_ADDRESS),
         "dtb_bytes": len(dtb),
         "dtb_sha256": hashlib.sha256(dtb).hexdigest(),
         "dtb_file_offset": PAGE_SIZE + len(padded(kernel)),

@@ -171,12 +171,14 @@ sysupgrade。当前产物只用于 RAM 验证，NAND 驱动仍不提供写入能
 `scripts/mk-ecm30-bootimg.py` 检查 uImage 头/数据 CRC、ARM zImage 边界、
 ECM30 DTB 及容量限制，再生成适配原厂 U-Boot 的 Android v2 镜像及 JSON
 校验报告。仅生成本地文件，不包含刷写操作。内核仍为已通过实机验证的
-`9059f835c6`，加载地址 0x43000000；Android 封装采用 2048 字节对齐，
+`9059f835c6`。原厂把启动镜像读到 0x43000000，Android 镜像将内核加载到
+独立的 0x45000000，避免原厂 U-Boot 的镜像覆盖检查拒绝启动；原 uImage
+的 RAM 入口仍为 0x43000000。Android 封装采用 2048 字节对齐，
 这是镜像格式的对齐，与 NAND 的 8192 字节逻辑页分别处理。
 
-输出已与 AOSP android-11.0.0_r1 的 mkbootimg 做逐字节比对，完全一致，
-并验证损坏 uImage 和无效 DTB 会被拒绝。镜像大小为 9236480 字节，SHA-256
-为 `bdc1810c4beee69d70ea99968dc64ac3333b4b2f3cb76106a238b9d6909d6959`。
+输出与 AOSP android-11.0.0_r1 的 mkbootimg 做逐字节比对，并验证损坏 uImage
+和无效 DTB 会被拒绝。镜像大小为 9236480 字节；校验值随加载地址修正重新
+生成，以最终 JSON 报告和实际通过 RAM 验证的镜像为准。
 该文件是 boot 卷的内容，不是整个 NAND 或 sys 分区的原始镜像。
 
 对照 SDK 的 U-Boot 源码发现，Android v2 路径会从 boot 卷重读 DTB，RAM
