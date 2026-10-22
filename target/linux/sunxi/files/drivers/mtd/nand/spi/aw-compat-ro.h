@@ -7,15 +7,16 @@
 
 struct spinand_device;
 
-/* The physical MTD is private: only this read-only view is registered. */
+/* The physical MTD is private; only the paired-block view is registered. */
 struct aw_spinand_compat {
 	struct mtd_info mtd;
 	struct mtd_info *physical;
 	struct mutex lock;
+	bool writable;
 };
 
 int aw_spinand_compat_init(struct aw_spinand_compat *compat,
-			 struct mtd_info *physical);
+			 struct mtd_info *physical, bool writable);
 int aw_spinand_compat_register(struct spinand_device *spinand);
 int aw_spinand_compat_unregister(struct spinand_device *spinand);
 

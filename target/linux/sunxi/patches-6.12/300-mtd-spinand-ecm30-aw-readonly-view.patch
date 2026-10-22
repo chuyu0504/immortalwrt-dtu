@@ -1,10 +1,9 @@
 From: ECM30 bring-up <noreply@localhost>
-Subject: [PATCH] mtd: spi-nand: add a read-only ECM30 AW logical view
+Subject: [PATCH] mtd: spi-nand: add the ECM30 AW paired-block view
 
-Port the vendor paired-block view to the Linux 6.12 SPI-NAND APIs.
-Keep native chip geometry private and preserve hardware block protection.
-Block WRITE ENABLE before any SPI transaction, including after resume.
-The c8:94 entry may only probe through the dedicated read-only compatible.
+Keep native geometry private. The original RO compatible still blocks WREN
+and preserves hardware protection. The separate writable compatible routes
+only sys writes through the vendor paired-page map and one-byte BBM rules.
 
 --- a/drivers/mtd/nand/spi/core.c
 +++ b/drivers/mtd/nand/spi/core.c
@@ -31,7 +30,40 @@ The c8:94 entry may only probe through the dedicated read-only compatible.
  
  	return spi_mem_exec_op(spinand->spimem, &op);
  }
-@@ -1413,6 +1418,10 @@
+@@ -1014,6 +1019,32 @@
+ 	ret = nanddev_mtd_erase(mtd, einfo);
+ 	mutex_unlock(&spinand->lock);
+ 
++	return ret;
++}
++
++/*
++ * Private ECM30 backend: the logical layer already checks the vendor's
++ * one-byte, ECC-protected bad marker. nanddev_mtd_erase() would instead
++ * consult the native two-byte raw marker and mistake AW metadata for a BBM.
++ */
++static int spinand_mtd_aw_erase(struct mtd_info *mtd, struct erase_info *einfo)
++{
++	struct spinand_device *spinand = mtd_to_spinand(mtd);
++	struct nand_device *nand = mtd_to_nanddev(mtd);
++	struct nand_pos pos;
++	int ret;
++
++	if (!spinand->aw_compat_enabled || spinand->aw_compat_readonly)
++		return -EROFS;
++	if (einfo->addr < 10 * 1024 * 1024 ||
++	    einfo->addr >= mtd->size || einfo->len != mtd->erasesize ||
++	    einfo->addr % mtd->erasesize)
++		return -EINVAL;
++	mutex_lock(&spinand->lock);
++	nanddev_offs_to_pos(nand, einfo->addr, &pos);
++	ret = spinand_erase(nand, &pos);
++	mutex_unlock(&spinand->lock);
++	einfo->fail_addr = ret ? einfo->addr : MTD_FAIL_ADDR_UNKNOWN;
+ 	return ret;
+ }
+ 
+@@ -1365,6 +1396,10 @@
  		return ret;
  	}
  
@@ -42,18 +74,18 @@ The c8:94 entry may only probe through the dedicated read-only compatible.
  	/* After power up, all blocks are locked, so unlock them here. */
  	for (i = 0; i < nand->memorg.ntargets; i++) {
  		ret = spinand_select_target(spinand, i);
-@@ -1464,6 +1473,18 @@
+@@ -1416,6 +1451,18 @@
  	ret = spinand_detect(spinand);
  	if (ret)
  		goto err_free_bufs;
 +
-+	if (spinand->aw_compat_readonly &&
++	if (spinand->aw_compat_enabled &&
 +	    (spinand->id.data[0] != 0xc8 || spinand->id.data[1] != 0x94)) {
 +		ret = -ENODEV;
 +		goto err_free_bufs;
 +	}
-+	/* The new chip entry is restricted to the verified read-only view. */
-+	if (!spinand->aw_compat_readonly &&
++	/* This chip must use the paired-block view, never a native alias. */
++	if (!spinand->aw_compat_enabled &&
 +	    spinand->id.data[0] == 0xc8 && spinand->id.data[1] == 0x94) {
 +		ret = -EOPNOTSUPP;
 +		goto err_free_bufs;
@@ -61,33 +93,37 @@ The c8:94 entry may only probe through the dedicated read-only compatible.
  
  	/*
  	 * Use kzalloc() instead of devm_kzalloc() here, because some drivers
-@@ -1576,6 +1597,8 @@
+@@ -1528,6 +1575,10 @@
  		return -ENOMEM;
  
  	spinand->spimem = mem;
 +	spinand->aw_compat_readonly = of_device_is_compatible(mem->spi->dev.of_node,
 +						"ebyte,ecm30-aw-spinand-ro");
++	spinand->aw_compat_enabled = spinand->aw_compat_readonly ||
++		of_device_is_compatible(mem->spi->dev.of_node, "ebyte,ecm30-aw-spinand");
  	spi_mem_set_drvdata(mem, spinand);
  	spinand_set_of_node(spinand, mem->spi->dev.of_node);
  	mutex_init(&spinand->lock);
-@@ -1586,7 +1609,10 @@
+@@ -1538,7 +1589,12 @@
  	if (ret)
  		return ret;
  
 -	ret = mtd_device_register(mtd, NULL, 0);
-+	if (spinand->aw_compat_readonly)
++	if (spinand->aw_compat_enabled) {
++		mtd->_erase = spinand_mtd_aw_erase;
 +		ret = aw_spinand_compat_register(spinand);
++	}
 +	else
 +		ret = mtd_device_register(mtd, NULL, 0);
  	if (ret)
  		goto err_spinand_cleanup;
  
-@@ -1607,7 +1633,10 @@
+@@ -1559,7 +1615,10 @@
  	spinand = spi_mem_get_drvdata(mem);
  	mtd = spinand_to_mtd(spinand);
  
 -	ret = mtd_device_unregister(mtd);
-+	if (spinand->aw_compat_readonly)
++	if (spinand->aw_compat_enabled)
 +		ret = aw_spinand_compat_unregister(spinand);
 +	else
 +		ret = mtd_device_unregister(mtd);
@@ -104,25 +140,27 @@ The c8:94 entry may only probe through the dedicated read-only compatible.
  
  #define SPINAND_MAX_ID_LEN	5
  /*
-@@ -414,6 +415,8 @@
+@@ -410,6 +411,9 @@
   * struct spinand_device - SPI NAND device instance
   * @base: NAND device instance
   * @spimem: pointer to the SPI mem object
++ * @aw_compat_enabled: use the ECM30 paired-block logical view
 + * @aw_compat_readonly: forbid writes for the ECM30 vendor-format view
-+ * @aw_compat: private read-only logical MTD, never a writable alias
++ * @aw_compat: private paired-block logical MTD, no native alias
   * @lock: lock used to serialize accesses to the NAND
   * @id: NAND ID as returned by READ_ID
   * @flags: NAND flags
-@@ -445,6 +448,8 @@
+@@ -441,6 +445,9 @@
  struct spinand_device {
  	struct nand_device base;
  	struct spi_mem *spimem;
++	bool aw_compat_enabled;
 +	bool aw_compat_readonly;
 +	struct aw_spinand_compat *aw_compat;
  	struct mutex lock;
  	struct spinand_id id;
  	u32 flags;
-@@ -540,6 +545,7 @@
+@@ -536,6 +543,7 @@
  
  int spinand_upd_cfg(struct spinand_device *spinand, u8 mask, u8 val);
  int spinand_write_reg_op(struct spinand_device *spinand, u8 reg, u8 val);
@@ -179,7 +217,9 @@ The c8:94 entry may only probe through the dedicated read-only compatible.
  		     NAND_MEMORG(1, 2048, 64, 64, 1024, 20, 1, 1, 1),
 --- a/drivers/mtd/nand/spi/Makefile
 +++ b/drivers/mtd/nand/spi/Makefile
-@@ -4 +4,4 @@
+@@ -2,3 +2,6 @@
+ spinand-objs := core.o alliancememory.o ato.o esmt.o foresee.o gigadevice.o macronix.o
+ spinand-objs += micron.o paragon.o toshiba.o winbond.o xtx.o
  obj-$(CONFIG_MTD_SPI_NAND) += spinand.o
 +
 +spinand-objs += aw-compat-ro.o
@@ -192,9 +232,9 @@ The c8:94 entry may only probe through the dedicated read-only compatible.
  	  This is the framework for the SPI NAND device drivers.
 +
 +config MTD_SPI_NAND_AW_COMPAT_KUNIT_TEST
-+	bool "Test ECM30 read-only AW SPI-NAND mapping"
++	bool "Test ECM30 AW SPI-NAND mapping and writes"
 +	depends on KUNIT && MTD_SPI_NAND=y
 +	default KUNIT_ALL_TESTS
 +	help
 +	  Exercise paired-block mapping, OOB, bad blocks, ECC and write
-+	  rejection against a fake physical MTD without NAND hardware.
++	  rejection, program and erase against a fake physical MTD.

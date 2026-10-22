@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Read-only Allwinner simulated-multiplane view for Ebyte ECM30.
+ * Allwinner simulated-multiplane view for Ebyte ECM30.
  *
  * Verified against the supplied ECM30 Linux 5.4 ELF's super_to_phy(),
  * addr_to_req() and aw_spinand_chip_isbad_super_block(). A logical page
  * concatenates the same page of two adjacent physical blocks. Offsets are
  * absolute NAND offsets; the 10 MiB sys offset must not be subtracted here.
  *
- * No physical MTD, OTP access, writable alias or program/erase callback is
- * exposed. The SPI-NAND core also rejects WRITE ENABLE for this device.
+ * The native MTD stays private. The original compatible remains read-only;
+ * the separate writable compatible only permits writes within sys.
  */
 
 #include <linux/errno.h>
@@ -16,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/spinand.h>
+#include <linux/sched.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
 
@@ -29,6 +30,7 @@
 #define AW_BLOCK		(2 * AW_PHY_BLOCK)
 #define AW_OOB		(2 * AW_PHY_OOB)
 #define AW_OOB_AVAIL	(2 * AW_SPARE)
+#define AW_WRITE_START	(SZ_8M + SZ_2M)
 
 static struct aw_spinand_compat *aw_to_compat(struct mtd_info *mtd)
 {
@@ -236,19 +238,183 @@ static int aw_max_bad_blocks(struct mtd_info *mtd, loff_t offset, size_t len)
 
 static int aw_erase(struct mtd_info *mtd, struct erase_info *info)
 {
-	return -EROFS;
+	struct aw_spinand_compat *compat = aw_to_compat(mtd);
+	loff_t base, end;
+	int ret = 0;
+	unsigned int half;
+
+	if (!compat->writable)
+		return -EROFS;
+	if (info->addr < AW_WRITE_START || info->addr > mtd->size ||
+	    info->len > mtd->size - info->addr ||
+	    info->addr % AW_BLOCK || info->len % AW_BLOCK)
+		return -EINVAL;
+	info->fail_addr = MTD_FAIL_ADDR_UNKNOWN;
+	end = info->addr + info->len;
+	mutex_lock(&compat->lock);
+	for (base = info->addr; base < end; base += AW_BLOCK) {
+		for (half = 0; half < 2; half++) {
+			ret = aw_isbad_half(compat, base, half);
+			if (ret) {
+				ret = ret < 0 ? ret : -EIO;
+				goto failed;
+			}
+		}
+		for (half = 0; half < 2; half++) {
+			struct erase_info physical = {
+				.addr = base + half * AW_PHY_BLOCK,
+				.len = AW_PHY_BLOCK,
+			};
+
+			/* The private backend bypasses the native two-byte BBM test. */
+			ret = compat->physical->_erase(compat->physical, &physical);
+			if (ret)
+				goto failed;
+		}
+		cond_resched();
+	}
+	goto out;
+failed:
+	info->fail_addr = base;
+out:
+	mutex_unlock(&compat->lock);
+	return ret;
+}
+
+static int aw_write_half(struct aw_spinand_compat *compat, loff_t page,
+			 unsigned int half, unsigned int column, size_t datalen,
+			 unsigned int ooboff, size_t ooblen,
+			 struct mtd_oob_ops *ops)
+{
+	unsigned int start = clamp_t(unsigned int, column,
+				    half * AW_PHY_PAGE, (half + 1) * AW_PHY_PAGE);
+	unsigned int end = clamp_t(unsigned int, column + datalen,
+				  half * AW_PHY_PAGE, (half + 1) * AW_PHY_PAGE);
+	unsigned int os = clamp_t(unsigned int, ooboff,
+				 half * AW_SPARE, (half + 1) * AW_SPARE);
+	unsigned int oe = clamp_t(unsigned int, ooboff + ooblen,
+				 half * AW_SPARE, (half + 1) * AW_SPARE);
+	struct mtd_oob_ops req = {
+		.mode = MTD_OPS_PLACE_OOB, .len = end - start,
+		.ooblen = oe - os, .ooboffs = os - half * AW_SPARE,
+	};
+	loff_t to = aw_physical_offset(page + half * AW_PHY_PAGE);
+	int ret;
+
+	if (!req.len && !req.ooblen)
+		return 0;
+	if (req.len) {
+		req.datbuf = ops->datbuf + ops->retlen;
+		to += start - half * AW_PHY_PAGE;
+	}
+	if (req.ooblen)
+		req.oobbuf = ops->oobbuf + ops->oobretlen;
+	ret = compat->physical->_write_oob(compat->physical, to, &req);
+	if (req.retlen > req.len || req.oobretlen > req.ooblen)
+		return -EIO;
+	ops->retlen += req.retlen;
+	ops->oobretlen += req.oobretlen;
+	if (ret)
+		return ret;
+	return req.retlen == req.len && req.oobretlen == req.ooblen ? 0 : -EIO;
 }
 
 static int aw_write_oob(struct mtd_info *mtd, loff_t to, struct mtd_oob_ops *ops)
 {
+	struct aw_spinand_compat *compat = aw_to_compat(mtd);
+	size_t remaining = ops->len, spare = ops->ooblen;
+	unsigned int column, ooboff = ops->ooboffs, half;
+	loff_t page;
+	int ret = 0;
+
 	ops->retlen = 0;
 	ops->oobretlen = 0;
-	return -EROFS;
+	if (!compat->writable)
+		return -EROFS;
+	if (ops->mode == MTD_OPS_RAW ||
+	    (spare && ops->mode != MTD_OPS_AUTO_OOB))
+		return -EOPNOTSUPP;
+	if (ops->mode != MTD_OPS_PLACE_OOB && ops->mode != MTD_OPS_AUTO_OOB)
+		return -EINVAL;
+	/* UBI subpages are whole physical pages; never reprogram a partial page. */
+	if (to < AW_WRITE_START || to > mtd->size || remaining > mtd->size - to ||
+	    to % AW_PHY_PAGE || remaining % AW_PHY_PAGE ||
+	    (remaining && !ops->datbuf) || (spare && !ops->oobbuf))
+		return -EINVAL;
+	if (spare && (to == mtd->size || ooboff >= AW_OOB_AVAIL ||
+	    spare > ((mtd->size - (to / AW_PAGE) * AW_PAGE) / AW_PAGE) *
+		    AW_OOB_AVAIL - ooboff))
+		return -EINVAL;
+	column = to % AW_PAGE;
+	page = to - column;
+	mutex_lock(&compat->lock);
+	while (remaining || spare) {
+		size_t bytes = min_t(size_t, AW_PAGE - column, remaining);
+		size_t oob = min_t(size_t, AW_OOB_AVAIL - ooboff, spare);
+
+		for (half = 0; half < 2; half++) {
+			ret = aw_write_half(compat, page, half, column, bytes,
+					    ooboff, oob, ops);
+			if (ret)
+				goto out;
+		}
+		remaining -= bytes;
+		spare -= oob;
+		page += AW_PAGE;
+		column = 0;
+		ooboff = 0;
+		cond_resched();
+	}
+out:
+	mutex_unlock(&compat->lock);
+	return ret;
 }
 
 static int aw_markbad(struct mtd_info *mtd, loff_t offset)
 {
-	return -EROFS;
+	struct aw_spinand_compat *compat = aw_to_compat(mtd);
+	u8 marker[AW_SPARE] = { 0 };
+	loff_t base;
+	unsigned int half, last;
+	int ret = 0, err;
+	bool newly_marked = false;
+
+	if (!compat->writable)
+		return -EROFS;
+	if (offset < AW_WRITE_START || offset >= mtd->size)
+		return -EINVAL;
+	base = (offset / AW_BLOCK) * AW_BLOCK;
+	mutex_lock(&compat->lock);
+	/* Match the vendor markers on both the first and last physical pages. */
+	for (half = 0; half < 2; half++) {
+		struct erase_info erase = {
+			.addr = base + half * AW_PHY_BLOCK, .len = AW_PHY_BLOCK,
+		};
+
+		err = aw_isbad_half(compat, base, half);
+		if (err > 0)
+			continue;
+		newly_marked = true;
+		/* Erase is best effort: a worn-out block must still be marked. */
+		compat->physical->_erase(compat->physical, &erase);
+		for (last = 0; last < 2; last++) {
+			struct mtd_oob_ops req = {
+				.mode = MTD_OPS_PLACE_OOB, .oobbuf = marker,
+				.ooblen = sizeof(marker),
+			};
+			loff_t to = erase.addr + last * (AW_PHY_BLOCK - AW_PHY_PAGE);
+
+			err = compat->physical->_write_oob(compat->physical, to, &req);
+			if (!err && req.oobretlen != sizeof(marker))
+				err = -EIO;
+			if (err && !ret)
+				ret = err;
+		}
+	}
+	if (!ret && newly_marked)
+		mtd->ecc_stats.badblocks++;
+	mutex_unlock(&compat->lock);
+	return ret;
 }
 
 static void aw_resume(struct mtd_info *mtd)
@@ -263,7 +429,7 @@ static void aw_resume(struct mtd_info *mtd)
 }
 
 int aw_spinand_compat_init(struct aw_spinand_compat *compat,
-			 struct mtd_info *physical)
+			 struct mtd_info *physical, bool writable)
 {
 	struct mtd_info *mtd = &compat->mtd;
 
@@ -271,14 +437,16 @@ int aw_spinand_compat_init(struct aw_spinand_compat *compat,
 	if (physical->size != SZ_512M || physical->writesize != AW_PHY_PAGE ||
 	    physical->erasesize != AW_PHY_BLOCK || physical->oobsize != AW_PHY_OOB ||
 	    physical->ecc_strength != 8 || physical->ecc_step_size != 512 ||
-	    !physical->_read_oob)
+	    !physical->_read_oob ||
+	    (writable && (!physical->_write_oob || !physical->_erase)))
 		return -EINVAL;
 
 	compat->physical = physical;
+	compat->writable = writable;
 	mutex_init(&compat->lock);
 	mtd->name = "sunxi_mtd_nand";
 	mtd->type = MTD_NANDFLASH;
-	mtd->flags = MTD_CAP_NANDFLASH & ~MTD_WRITEABLE;
+	mtd->flags = MTD_CAP_NANDFLASH & (writable ? ~0U : ~MTD_WRITEABLE);
 	mtd->owner = THIS_MODULE;
 	mtd->size = physical->size;
 	mtd->writesize = AW_PAGE;
@@ -313,7 +481,7 @@ static const struct mtd_partition aw_partitions[] = {
 	{ .name = "secure_storage", .offset = SZ_8M, .size = SZ_2M,
 	  .mask_flags = MTD_WRITEABLE },
 	{ .name = "sys", .offset = SZ_8M + SZ_2M, .size = SZ_512M - SZ_8M - SZ_2M,
-	  .mask_flags = MTD_WRITEABLE },
+	  .mask_flags = 0 },
 };
 
 int aw_spinand_compat_register(struct spinand_device *spinand)
@@ -323,13 +491,14 @@ int aw_spinand_compat_register(struct spinand_device *spinand)
 	struct aw_spinand_compat *compat;
 	int ret;
 
-	if (!spinand->aw_compat_readonly || spinand->id.data[0] != 0xc8 ||
+	if (!spinand->aw_compat_enabled || spinand->id.data[0] != 0xc8 ||
 	    spinand->id.data[1] != 0x94)
 		return -ENODEV;
 	compat = devm_kzalloc(dev, sizeof(*compat), GFP_KERNEL);
 	if (!compat)
 		return -ENOMEM;
-	ret = aw_spinand_compat_init(compat, spinand_to_mtd(spinand));
+	ret = aw_spinand_compat_init(compat, spinand_to_mtd(spinand),
+				    !spinand->aw_compat_readonly);
 	if (ret)
 		return dev_err_probe(dev, ret, "Unsupported ECM30 NAND geometry\n");
 	compat->mtd.dev.parent = dev;
@@ -339,7 +508,8 @@ int aw_spinand_compat_register(struct spinand_device *spinand)
 	if (ret)
 		return ret;
 	spinand->aw_compat = compat;
-	dev_info(dev, "AW NAND compatibility: read-only, 8192-byte pages, 524288-byte blocks\n");
+	dev_info(dev, "AW NAND compatibility: %s, 8192-byte pages, 524288-byte blocks\n",
+		 compat->writable ? "sys writable" : "read-only");
 	return 0;
 }
 
