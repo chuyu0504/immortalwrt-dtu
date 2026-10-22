@@ -1,7 +1,8 @@
 #!/bin/sh
 # Initial migration from the backed-up factory layout, from a RAM recovery boot.
 # Usage: sh ecm30-install-nand.sh --check|--install IMAGE IMAGE_SHA256 BOOT_SHA256
-set -eu
+# OpenWrt's shared shell helpers intentionally read unset optional variables.
+set -e
 
 [ "$#" = 4 ] || { echo "Expected mode, image, image SHA-256, original boot SHA-256" >&2; exit 2; }
 mode="$1" image="$2" image_sha="$3" boot_sha="$4"
