@@ -1,8 +1,11 @@
-# TAS-682F firmware repository guide
+# DTU firmware repository guide
 
 ## Scope
 
-- This repository is the authoritative firmware source for TAS-682F.
+- This repository maintains TAS-682F, IT-694_s3 and Ebyte T113-I ECM30.
+  Keep only the `ramips/mt76x8` and `sunxi/cortexa7` device targets, together
+  with their shared build infrastructure and dependencies. Do not restore
+  unrelated board targets, bootloaders or device-specific packages.
 - Maintain EdgeNode directly under `package/network/services/edgenode` and its
   LuCI application under `package/luci-app-edgenode`.
 - Base firmware on the official ImmortalWrt `v25.12.2` tag (Linux 6.12).

@@ -1,13 +1,24 @@
 <img src="https://avatars.githubusercontent.com/u/53193414?s=200&v=4" alt="logo" width="200" height="200" align="right">
 
-# Project ImmortalWrt
+# ImmortalWrt DTU firmware
 
 This device tree is based on the official **ImmortalWrt v25.12.2** release
 (`4fc16f2985a358bd43bb522e43f05395fcbd6ed5`), using Linux 6.12.103.
 The official packages and LuCI feeds are pinned to the exact revisions shipped
 with that release. Do not update this tree from master.
 
-The TAS-682F / IT-694_s3 release seed is `configs/tastek-mt76x8.config`.
+This repository maintains three devices:
+
+| Device | Target | Release seed |
+| --- | --- | --- |
+| Tastek TAS-682F | ramips/mt76x8 | `configs/tastek-mt76x8.config` |
+| Tastek IT-694_s3 | ramips/mt76x8 | `configs/tastek-mt76x8.config` |
+| Ebyte T113-I ECM30 | sunxi/cortexa7 | `configs/ebyte-ecm30.config` |
+
+Unrelated board targets, bootloaders and device-specific packages are removed.
+Shared build tools, libraries and kernel infrastructure remain available.
+
+The TAS-682F / IT-694_s3 release seed builds both images together.
 The independent ECM30 seed is `configs/ebyte-ecm30.config`. Linux 6.12 NAND boot,
 the factory 8 KiB / 512 KiB geometry, SquashFS with a UBIFS overlay, and
 configuration-preserving sysupgrade have been verified on hardware. A RAM
@@ -19,12 +30,11 @@ Compared to upstream, we allow to use (non-upstreamable) modifications/hacks to 
 
 Default login address: http://192.168.1.1 or http://immortalwrt.lan, username: __root__, password: _none_.
 
-## Download
-Built firmware images are available for many architectures and come with a package selection to be used as WiFi home router. To quickly find a factory image usable to migrate from a vendor stock firmware to ImmortalWrt, try the *Firmware Selector*.
+## Firmware images
 
-- [ImmortalWrt Firmware Selector](https://firmware-selector.immortalwrt.org/)
-
-If your device is supported, please follow the **Info** link to see install instructions or consult the support resources listed below.
+Build the matching seed configuration from this repository. TAS-682F and
+IT-694_s3 images are written to `bin/targets/ramips/mt76x8/`; ECM30 NAND and
+RAM recovery images are written to `bin/targets/sunxi/cortexa7/`.
 
 ## Development
 To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensitive filesystem required). Cygwin is unsupported because of the lack of a case sensitive file system.<br/>
@@ -68,21 +78,22 @@ To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensi
 
   ### Quickstart
   1. Run `git clone -b codex/immortalwrt-25.12.2 --single-branch --filter=blob:none https://github.com/hyird/immortalwrt-dtu.git` to clone this device tree.
-  2. Run `cd immortalwrt` to enter source directory.
+  2. Run `cd immortalwrt-dtu` to enter the source directory.
   3. Run `./scripts/feeds update -a` to obtain the pinned official feeds.
   4. Run `./scripts/install-tas-feeds.sh` to install the selected packages and their dependencies.
   5. Run `cp configs/tastek-mt76x8.config .config && make defconfig` to select the TAS-682F and IT-694_s3 release profiles.
   6. Run `make` to build your firmware. This will download all sources, build the cross-compile toolchain and then cross-compile the GNU/Linux kernel & all chosen applications for your target system.
 
+  For ECM30, use `cp configs/ebyte-ecm30.config .config && make defconfig` in step 5.
+
   ### Related Repositories
-  The main repository uses multiple sub-repositories to manage packages of different categories. All packages are installed via the OpenWrt package manager called opkg. If you're looking to develop the web interface or port packages to ImmortalWrt, please find the fitting repository below.
+  The official package and LuCI feeds are pinned in `feeds.conf.default`.
+  The release seeds use APK during image assembly and omit an on-device package manager.
   - [LuCI Web Interface](https://github.com/immortalwrt/luci): Modern and modular interface to control the device via a web browser.
   - [ImmortalWrt Packages](https://github.com/immortalwrt/packages): Community repository of ported packages.
-  - [OpenWrt Routing](https://github.com/openwrt/routing): Packages specifically focused on (mesh) routing.
-  - [OpenWrt Video](https://github.com/openwrt/video): Packages specifically focused on display servers and clients (Xorg and Wayland).
 
 ## Support Information
-For a list of supported devices see the [OpenWrt Hardware Database](https://openwrt.org/supported_devices)
+The supported devices in this repository are listed above.
   ### Documentation
   - [Quick Start Guide](https://openwrt.org/docs/guide-quick-start/start)
   - [User Guide](https://openwrt.org/docs/guide-user/start)
