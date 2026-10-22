@@ -9,6 +9,9 @@
   Keep `packages` and `luci` pinned to the official revisions recorded by that
   release in `feeds.conf.default`; do not track master, add private feed forks,
   or duplicate EdgeNode packages in a feed.
+- Keep `codex/immortalwrt-25.12.2` as the default and sole maintained branch.
+  Do not recreate `main`/`master` or merge upstream master; review future
+  baseline updates against an explicitly selected official release tag.
 - Every EdgeNode change must remain backward compatible with deployed firmware,
   including protocol messages, platform APIs, configuration, tasks, and upgrade
   transport. Do not remove an old path until a tested migration and compatibility

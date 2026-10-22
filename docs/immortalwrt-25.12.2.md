@@ -12,6 +12,11 @@
 提交，而非会继续移动的 `openwrt-25.12` 分支。升级补丁版本时，应一起审查
 固件 tag、内核补丁、两个 feed 提交及依赖版本。
 
+仓库默认且唯一维护的分支为 `codex/immortalwrt-25.12.2`。旧 `main` 及开发分支
+归档后移除，不再跟随或合并主线 master。GitHub Actions 的 push 构建也只监听
+25.12.2 分支。分支清理前的完整 Git 历史及 stash 保存在本地忽略目录
+`artifacts/git-backups/` 的 Git bundle 中；归档不作为继续开发的分支。
+
 ## 保留的功能
 
 TAS-682F、IT-694_s3、EdgeNode 0.3.70、LuCI 应用、网络看门狗和既有精简策略
