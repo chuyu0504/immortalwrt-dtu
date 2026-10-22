@@ -148,8 +148,62 @@ def scenario(executable, mode):
                 process.communicate()
 
 
+def close_scenario(executable, mode, code, reason):
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        listener.settimeout(12)
+        arguments = [executable, f'ws://127.0.0.1:{listener.getsockname()[1]}/close', str(code), reason]
+        if mode == 'local':
+            arguments.append('local')
+        process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            with listener.accept()[0] as sock:
+                sock.settimeout(12)
+                request = bytearray()
+                while not request.endswith(b'\r\n\r\n'):
+                    request.extend(exact(sock, 1))
+                    assert len(request) < 8192
+                headers = dict(line.split(':', 1) for line in request.decode().split('\r\n')[1:] if ':' in line)
+                headers = {key.lower(): value.strip() for key, value in headers.items()}
+                accept = base64.b64encode(hashlib.sha1((headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+                sock.sendall(('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                              f'Sec-WebSocket-Accept: {accept}\r\n\r\n').encode())
+                if mode == 'abrupt':
+                    sock.shutdown(socket.SHUT_RDWR)
+                else:
+                    if mode == 'oversize':
+                        send_frame(sock, 0x82, b'x' * 17000)
+                    elif mode != 'local':
+                        payload = b'' if mode == 'no-status' else struct.pack('!H', code) + reason.encode()
+                        send_frame(sock, 0x88, payload)
+                    first, reply = read_frame(sock)
+                    assert first == 0x88
+                    if mode == 'local':
+                        assert reply == struct.pack('!H', code) + reason.encode()
+                        send_frame(sock, 0x88, reply)
+            stdout, stderr = process.communicate(timeout=12)
+            assert process.returncode == 0, stderr.decode()
+            assert f'CLOSE {code} {reason}' in stdout.decode(), stdout
+            return {'close': mode, 'code': code, 'reason': reason, 'result': 'passed'}
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+
 if __name__ == '__main__':
     # 并行连接验证测试实例不共享压缩状态；进程内多平台隔离需另行集成验收。
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         results = list(pool.map(lambda mode: scenario(sys.argv[1], mode), ['plain', 'reset', 'takeover']))
+    for mode, code, reason in [
+        ('peer', 1000, 'maintenance'),
+        ('peer', 1008, '身份未注册'),
+        ('peer', 4001, 'identity missing'),
+        ('no-status', 1005, 'peer closed without status'),
+        ('abrupt', 1006, 'connection lost without close frame'),
+        ('local', 1011, 'hello failed'),
+        ('oversize', 1009, 'message too large'),
+    ]:
+        results.append(close_scenario(sys.argv[1], mode, code, reason))
     print(json.dumps(results, ensure_ascii=False, indent=2))

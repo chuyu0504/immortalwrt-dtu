@@ -10,10 +10,19 @@ typedef struct {
     unsigned char payload[4096];
     unsigned received;
     bool failed;
+    bool close_test;
+    bool local_close;
+    int expected_code;
+    const char *expected_reason;
 } fixture;
 
 static void opened(void *user) {
     fixture *state = user;
+    if (state->close_test) {
+        if (state->local_close)
+            edge_ws_transport_close(&state->transport, state->expected_code, state->expected_reason);
+        return;
+    }
     if (!edge_ws_transport_send(&state->transport, "ack", 3) ||
         !edge_ws_transport_send(&state->transport, state->payload, sizeof(state->payload)) ||
         !edge_ws_transport_send(&state->transport, state->payload, sizeof(state->payload))) {
@@ -39,7 +48,14 @@ static void received(void *user, void *data, size_t size, bool binary) {
 
 static void closed(void *user, int code, const char *reason) {
     fixture *state = user;
-    if (state->received != 3) {
+    if (state->close_test) {
+        if (code != state->expected_code || strcmp(reason, state->expected_reason)) {
+            fprintf(stderr, "close mismatch: %d %s, expected %d %s\n",
+                    code, reason, state->expected_code, state->expected_reason);
+            state->failed = true;
+        }
+        printf("CLOSE %d %s\n", code, reason);
+    } else if (state->received != 3 || code != 1000 || strcmp(reason, "verified")) {
         fprintf(stderr, "premature close: %d %s (%u messages)\n", code, reason, state->received);
         state->failed = true;
     }
@@ -55,9 +71,15 @@ static void timed_out(struct ev_loop *loop, struct ev_timer *timer, int events) 
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc != 2 && argc != 4 && argc != 5) return 2;
     if (getenv("EDGE_WS_TEST_LOG")) lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO | LLL_DEBUG, NULL);
     fixture state = {0};
+    if (argc >= 4) {
+        state.close_test = true;
+        state.expected_code = atoi(argv[2]);
+        state.expected_reason = argv[3];
+        state.local_close = argc == 5;
+    }
     state.loop = ev_loop_new(0);
     if (!state.loop) return 2;
     uint32_t random = 12345;
@@ -79,5 +101,5 @@ int main(int argc, char **argv) {
     ev_timer_stop(state.loop, &deadline);
     ev_run(state.loop, EVRUN_NOWAIT);
     ev_loop_destroy(state.loop);
-    return state.failed || state.received != 3 ? 1 : 0;
+    return state.failed || (!state.close_test && state.received != 3) ? 1 : 0;
 }

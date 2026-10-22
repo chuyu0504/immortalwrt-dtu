@@ -56,6 +56,13 @@ if(EDGENODE_WS_TRANSPORT_TESTS)
     add_test(NAME edge_ws_transport COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_LIST_DIR}/edge_ws_transport_test.py" "$<TARGET_FILE:edge_ws_transport_fixture>")
     set_tests_properties(edge_ws_transport PROPERTIES TIMEOUT 45)
+    add_executable(edge_identity_test edge_identity_test.c)
+    target_include_directories(edge_identity_test PRIVATE
+        "${EDGENODE_ROOT}/src" "${LWS_INCLUDE_DIR}" "${LWS_CONFIG_INCLUDE_DIR}" "${LIBEV_INCLUDE_DIR}")
+    target_link_libraries(edge_identity_test PRIVATE edgenode_nanopb "${LIBEV_LIBRARY}")
+    target_compile_options(edge_identity_test PRIVATE -UNDEBUG)
+    add_test(NAME edge_identity COMMAND edge_identity_test)
+    set_tests_properties(edge_identity PROPERTIES TIMEOUT 10)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

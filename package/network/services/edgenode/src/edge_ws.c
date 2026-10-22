@@ -1913,15 +1913,7 @@ static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int event
         .platform_count = app->config->platform_count,
     };
     (void)edge_status_write(&snapshot);
-    // Independent watchdog observes progress, not platform connectivity.
-    FILE *health = fopen("/tmp/edgenode/loop.health.new", "w");
-    if (health != NULL) {
-        const bool written = fprintf(health, "%ld %llu\n", (long)getpid(),
-                                     (unsigned long long)snapshot.now_ms) > 0;
-        const bool closed = fclose(health) == 0;
-        if (written && closed)
-            (void)rename("/tmp/edgenode/loop.health.new", "/tmp/edgenode/loop.health");
-    }
+    edge_process_report_progress();
 }
 
 static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {

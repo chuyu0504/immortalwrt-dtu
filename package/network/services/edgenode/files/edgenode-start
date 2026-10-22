@@ -1,8 +1,7 @@
 #!/bin/sh
 
-# The modem identity is optional at process start. 4GINFO owns modem probing
-# and persists a valid IMEI when it becomes available; EdgeNode must still run
-# and report its platform/network state while the modem is unavailable.
+# 4GINFO owns modem probing and persists a valid IMEI. The daemon keeps its
+# event loop and watchdog alive while waiting, before starting platform sessions.
 mkdir -p /tmp/edgenode
 # Opt in with the PID preserved by exec; old binaries without this launcher
 # are not treated as stalled merely because they lack the new health file.

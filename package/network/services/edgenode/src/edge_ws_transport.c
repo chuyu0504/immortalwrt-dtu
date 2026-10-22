@@ -26,6 +26,17 @@ static void disconnected(edge_ws_transport *transport, int code, const char *rea
     }
 }
 
+static void remember_close(edge_ws_transport *transport, uint16_t code,
+                           const void *reason, size_t size) {
+    const unsigned char *text = reason;
+    transport->close_code = code;
+    if (size >= sizeof(transport->close_reason))
+        size = sizeof(transport->close_reason) - 1U;
+    for (size_t i = 0; i < size; ++i)
+        transport->close_reason[i] = text[i] < 0x20 || text[i] == 0x7f ? ' ' : (char)text[i];
+    transport->close_reason[size] = '\0';
+}
+
 static int websocket_callback(struct lws *socket, enum lws_callback_reasons reason,
                               void *user, void *input, size_t size) {
     edge_ws_transport *transport = lws_context_user(lws_get_context(socket));
@@ -45,12 +56,17 @@ static int websocket_callback(struct lws *socket, enum lws_callback_reasons reas
         if (!transport->incoming_size)
             transport->incoming_binary = lws_frame_is_binary(socket);
         if (size > transport->message_limit - transport->incoming_size) {
+            remember_close(transport, 1009, "message too large", 17);
             lws_close_reason(socket, LWS_CLOSE_STATUS_MESSAGE_TOO_LARGE, NULL, 0);
             return -1;
         }
         if (!transport->incoming) {
             transport->incoming = malloc(transport->message_limit);
-            if (!transport->incoming) return -1;
+            if (!transport->incoming) {
+                remember_close(transport, 1011, "receive allocation failed", 25);
+                lws_close_reason(socket, LWS_CLOSE_STATUS_UNEXPECTED_CONDITION, NULL, 0);
+                return -1;
+            }
         }
         if (size) memcpy(transport->incoming + transport->incoming_size, input, size);
         transport->incoming_size += size;
@@ -83,8 +99,20 @@ static int websocket_callback(struct lws *socket, enum lws_callback_reasons reas
     case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
         disconnected(transport, 1006, input ? (const char *)input : "connection failed");
         break;
+    case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE: {
+        const unsigned char *payload = input;
+        /* LWS supplies the close frame payload, without a terminating NUL. */
+        if (size >= 2U)
+            remember_close(transport, (uint16_t)((payload[0] << 8) | payload[1]),
+                           payload + 2, size - 2U);
+        else
+            remember_close(transport, 1005, "peer closed without status", 26);
+        break;
+    }
     case LWS_CALLBACK_CLIENT_CLOSED:
-        disconnected(transport, 1000, "connection closed");
+        disconnected(transport, transport->close_code ? transport->close_code : 1006,
+                     transport->close_code ? transport->close_reason :
+                     "connection lost without close frame");
         break;
     default:
         break;
@@ -189,8 +217,7 @@ bool edge_ws_transport_send(edge_ws_transport *transport, const void *data, size
 void edge_ws_transport_close(edge_ws_transport *transport, uint16_t code, const char *reason) {
     if (!transport->socket) return;
     transport->closing = true;
-    transport->close_code = code;
-    snprintf(transport->close_reason, sizeof(transport->close_reason), "%s", reason ? reason : "");
+    remember_close(transport, code, reason, reason ? strlen(reason) : 0U);
     lws_callback_on_writable(transport->socket);
 }
 

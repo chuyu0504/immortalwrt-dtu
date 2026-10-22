@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -15,6 +17,17 @@ static uint64_t monotonic_milliseconds(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &value) != 0)
         return 0U;
     return (uint64_t)value.tv_sec * 1000U + (uint64_t)value.tv_nsec / 1000000U;
+}
+
+void edge_process_report_progress(void) {
+    FILE *health = fopen("/tmp/edgenode/loop.health.new", "w");
+    if (health == NULL)
+        return;
+    const bool written = fprintf(health, "%ld %llu\n", (long)getpid(),
+                                 (unsigned long long)monotonic_milliseconds()) > 0;
+    const bool closed = fclose(health) == 0;
+    if (written && closed)
+        (void)rename("/tmp/edgenode/loop.health.new", "/tmp/edgenode/loop.health");
 }
 
 int edge_process_run_timeout(const char *const argv[], int stdin_fd, int stdout_fd,

@@ -9,6 +9,7 @@
 
 #include "edge_config.h"
 #include "edge_modem.h"
+#include "edge_process.h"
 #include "edge_ws.h"
 #include "log.h"
 
@@ -17,6 +18,21 @@ static bool reload_requested;
 static void signal_received(struct ev_loop *loop, ev_signal *watcher, int events) {
     (void)events;
     reload_requested = watcher->signum == SIGHUP;
+    ev_break(loop, EVBREAK_ALL);
+}
+
+static void identity_ready(struct ev_loop *loop, ev_timer *watcher, int events) {
+    (void)watcher;
+    (void)events;
+    edge_app_config candidate;
+    char error[256];
+    edge_process_report_progress();
+    /* 4GINFO persists the identity asynchronously. Read it again before
+     * starting any platform session, without blocking the init service. */
+    if (!edge_config_load(&candidate, error, sizeof(error)) || !candidate.imei[0])
+        return;
+    syslog(LOG_INFO, "modem identity is ready; loading configuration");
+    reload_requested = true;
     ev_break(loop, EVBREAK_ALL);
 }
 
@@ -60,6 +76,18 @@ int main(int argc, char **argv) {
             syslog(LOG_ERR, "configuration rejected: %s", error);
             edge_log_local_fault(NULL, NULL, 0U, EDGE_LOCAL_FAULT_CONFIG, 3U);
             exit_code = EXIT_FAILURE;
+            break;
+        }
+        if (!config.imei[0]) {
+            ev_timer identity;
+            syslog(LOG_INFO, "waiting for modem IMEI before starting platform sessions");
+            edge_process_report_progress();
+            ev_timer_init(&identity, identity_ready, 1.0, 1.0);
+            ev_timer_start(loop, &identity);
+            ev_run(loop, 0);
+            ev_timer_stop(loop, &identity);
+            if (reload_requested)
+                continue;
             break;
         }
         if (!edge_ws_app_init(app, loop, &config)) {

@@ -1,5 +1,8 @@
 #pragma once
 
+/* Publish main-loop progress for the independent service watchdog. */
+void edge_process_report_progress(void);
+
 /* Runs argv without a shell. Negative file descriptors keep stdin/stdout unchanged. */
 int edge_process_run(const char *const argv[], int stdin_fd, int stdout_fd);
 int edge_process_run_timeout(const char *const argv[], int stdin_fd, int stdout_fd,
