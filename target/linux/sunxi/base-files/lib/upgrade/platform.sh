@@ -9,8 +9,8 @@ CI_SKIP_KERNEL_MTD=1
 
 ECM30_TAR_DIR=sysupgrade-ebyte_ecm30
 ECM30_BOOT_BYTES=17031168
-# 32 physical 512 KiB eraseblocks, each with 516096 bytes available to UBI.
-ECM30_ROOT_BYTES=16515072
+# 16 physical 512 KiB eraseblocks, each with 516096 bytes available to UBI.
+ECM30_ROOT_BYTES=8257536
 
 ecm30_check_tar() {
 	local file="$1" listing kernel_size root_size
@@ -62,14 +62,14 @@ ecm30_check_nand() {
 ecm30_check_layout() {
 	ecm30_check_nand || return 1
 	[ "$(nand_find_volume ubi0 rootfs_data)" = ubi0_8 ] || return 1
-	[ "$(cat /sys/class/ubi/ubi0_5/reserved_ebs)" = 32 ] || return 1
+	[ "$(cat /sys/class/ubi/ubi0_5/reserved_ebs)" = 16 ] || return 1
 	[ "$(cat /sys/class/ubi/ubi0_8/upd_marker)" = 0 ] || return 1
 	[ "$(cat /sys/class/ubi/ubi0_8/corrupted)" = 0 ] || return 1
 }
 
 ecm30_check_install_layout() {
 	local entry id name lebs
-	# Initial installation and shrinking the earlier 32 MiB allocation both
+	# Initial installation and shrinking earlier 16/32 MiB allocations both
 	# require the initramfs recovery system, with the old volumes unmounted.
 	[ "$(rootfs_type)" = tmpfs ] || return 1
 	ecm30_check_nand || return 1
@@ -79,7 +79,7 @@ ecm30_check_install_layout() {
 		[ "$(cat /sys/class/ubi/ubi0/volumes_count)" = 8 ] || return 1
 		[ -z "$(nand_find_volume ubi0 rootfs_data)" ] || return 1
 		;;
-	64)
+	32|64)
 		[ "$(cat /sys/class/ubi/ubi0/volumes_count)" = 9 ] || return 1
 		[ "$(nand_find_volume ubi0 rootfs_data)" = ubi0_8 ] || return 1
 		[ "$(cat /sys/class/ubi/ubi0_8/upd_marker)" = 0 ] || return 1

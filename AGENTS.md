@@ -82,9 +82,9 @@
   First installation from the factory layout must use the same LuCI/sysupgrade
   path from the RAM recovery image; keep migration inside the NAND platform
   hooks, retain non-system volumes, and never fall back to formatting sys.
-  Allocate 32 eraseblocks to the SquashFS rootfs (16 MiB NAND / 15.75 MiB UBI
+  Allocate 16 eraseblocks to the SquashFS rootfs (8 MiB NAND / 7.875 MiB UBI
   capacity); assign the remaining UBI space to rootfs_data. Shrinking the
-  earlier 64-eraseblock allocation requires the RAM recovery upgrade path.
+  earlier 32/64-eraseblock allocations requires the RAM recovery upgrade path.
   Do not run global `make clean` for routine source-only updates when the build
   checkout has a verified clean baseline. Use it only when the toolchain,
   target, seed configuration, or dependency baseline changed, or when stale
