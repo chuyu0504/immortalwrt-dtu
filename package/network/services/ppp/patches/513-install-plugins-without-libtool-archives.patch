@@ -74,20 +74,6 @@ misleading --finish reminder for the DESTDIR staging path.
 +	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
 +		"$(DESTDIR)$(pppd_plugindir)/"
 
---- a/pppd/plugins/dhcpv6relay/Makefile.am
-+++ b/pppd/plugins/dhcpv6relay/Makefile.am
-@@ -1,3 +1,9 @@
--pppd_plugin_LTLIBRARIES = dhcpv6relay.la
-+pppd_plugin_LIBS = dhcpv6relay.la
-+pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
-+noinst_LTLIBRARIES = $(pppd_plugin_LIBS)
- pppd_plugindir = $(PPPD_PLUGIN_DIR)
- 
-+install-data-local:
-+	$(MKDIR_P) "$(DESTDIR)$(pppd_plugindir)"
-+	$(INSTALL_PROGRAM) $(pppd_plugin_SOS) \
-+		"$(DESTDIR)$(pppd_plugindir)/"
-
 --- a/pppd/plugins/pptp/Makefile.am
 +++ b/pppd/plugins/pptp/Makefile.am
 @@ -1,3 +1,9 @@

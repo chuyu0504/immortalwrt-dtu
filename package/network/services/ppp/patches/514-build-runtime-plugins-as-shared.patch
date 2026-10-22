@@ -34,12 +34,6 @@ so keep them shared even though their libtool archives are build-only.
 -RADIUS_LDFLAGS = -module -avoid-version $(LDFLAGS)
 +RADIUS_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir) $(LDFLAGS)
 
---- a/pppd/plugins/dhcpv6relay/Makefile.am
-+++ b/pppd/plugins/dhcpv6relay/Makefile.am
-@@ -14 +14 @@
--dhcpv6relay_la_LDFLAGS = -module -avoid-version
-+dhcpv6relay_la_LDFLAGS = -module -avoid-version -rpath $(pppd_plugindir)
-
 --- a/pppd/plugins/pptp/Makefile.am
 +++ b/pppd/plugins/pptp/Makefile.am
 @@ -19 +19 @@

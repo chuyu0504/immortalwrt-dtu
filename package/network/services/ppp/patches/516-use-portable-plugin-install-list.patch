@@ -31,12 +31,6 @@ explicit so current Automake does not warn about a non-POSIX variable name.
 -pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
 +pppd_plugin_SOS = .libs/radius.so .libs/radattr.so .libs/radrealms.so
 
---- a/pppd/plugins/dhcpv6relay/Makefile.am
-+++ b/pppd/plugins/dhcpv6relay/Makefile.am
-@@ -2 +2 @@
--pppd_plugin_SOS = $(pppd_plugin_LIBS:.la=.so)
-+pppd_plugin_SOS = .libs/dhcpv6relay.so
-
 --- a/pppd/plugins/pptp/Makefile.am
 +++ b/pppd/plugins/pptp/Makefile.am
 @@ -2 +2 @@
