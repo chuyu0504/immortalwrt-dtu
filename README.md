@@ -25,6 +25,14 @@ configuration-preserving sysupgrade have been verified on hardware. A RAM
 recovery image is built alongside the NAND firmware.
 See [AGENTS.md](AGENTS.md) for the release workflow.
 
+For the first ECM30 installation on a board with the supported factory system,
+boot the initramfs recovery image from U-Boot, open LuCI at `192.168.1.1`, and
+upload the ECM30 sysupgrade image under **System → Backup / Flash Firmware**.
+The standard sysupgrade path checks the factory UBI layout, creates the rootfs
+and overlay volumes, verifies the written kernel and rootfs, and reboots.
+Subsequent upgrades use the same page and image format. The factory bootloader,
+environment, private data and 8 KiB / 512 KiB NAND geometry are retained.
+
 ImmortalWrt is a fork of [OpenWrt](https://openwrt.org), with more packages ported, more devices supported, default optimized profiles and localization modifications for mainland China users.<br/>
 Compared to upstream, we allow to use (non-upstreamable) modifications/hacks to provide better feature/performance/support.
 

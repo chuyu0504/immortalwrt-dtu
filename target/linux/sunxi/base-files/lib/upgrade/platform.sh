@@ -31,7 +31,7 @@ ecm30_check_tar() {
 	[ "$(get_magic_long_tar "$file" cat "$ECM30_TAR_DIR/root")" = 68737173 ] || return 1
 }
 
-ecm30_check_layout() {
+ecm30_check_nand() {
 	local mtd ubi name id
 	mtd="$(find_mtd_index sys)"
 	case "$mtd" in ''|*[!0-9]*) return 1 ;; esac
@@ -44,12 +44,10 @@ ecm30_check_layout() {
 	[ "$(cat /sys/class/ubi/$ubi/ro_mode)" = 0 ] || return 1
 	[ "$(nand_find_volume "$ubi" boot)" = ubi0_4 ] || return 1
 	[ "$(nand_find_volume "$ubi" rootfs)" = ubi0_5 ] || return 1
-	[ "$(nand_find_volume "$ubi" rootfs_data)" = ubi0_8 ] || return 1
 	[ "$(cat /sys/class/ubi/ubi0_4/reserved_ebs)" = 33 ] || return 1
-	[ "$(cat /sys/class/ubi/ubi0_5/reserved_ebs)" = 64 ] || return 1
 	[ "$(cat /sys/class/ubi/ubi0_4/usable_eb_size)" = 516096 ] || return 1
 	[ "$(cat /sys/class/ubi/ubi0_5/usable_eb_size)" = 516096 ] || return 1
-	for id in 4 5 8; do
+	for id in 4 5; do
 		[ "$(cat /sys/class/ubi/ubi0_$id/upd_marker)" = 0 ] || return 1
 		[ "$(cat /sys/class/ubi/ubi0_$id/corrupted)" = 0 ] || return 1
 	done
@@ -60,13 +58,45 @@ ecm30_check_layout() {
 	done
 }
 
+ecm30_check_layout() {
+	ecm30_check_nand || return 1
+	[ "$(nand_find_volume ubi0 rootfs_data)" = ubi0_8 ] || return 1
+	[ "$(cat /sys/class/ubi/ubi0_5/reserved_ebs)" = 64 ] || return 1
+	[ "$(cat /sys/class/ubi/ubi0_8/upd_marker)" = 0 ] || return 1
+	[ "$(cat /sys/class/ubi/ubi0_8/corrupted)" = 0 ] || return 1
+}
+
+ecm30_check_factory_layout() {
+	local entry id name lebs
+	# Initial installation is only allowed from the initramfs recovery system.
+	[ "$(rootfs_type)" = tmpfs ] || return 1
+	ecm30_check_nand || return 1
+	[ "$(cat /sys/class/ubi/ubi0/volumes_count)" = 8 ] || return 1
+	[ -z "$(nand_find_volume ubi0 rootfs_data)" ] || return 1
+	[ "$(get_magic_long /dev/ubi0_4)" = 414e4452 ] || return 1
+	# Refuse unknown factory layouts and preserve all non-system volumes.
+	for entry in 0:mbr:1 1:boot-resource:1 2:env:1 3:env-redund:1 \
+		4:boot:33 5:rootfs:920 6:private:2 7:UDISK:1; do
+		id="${entry%%:*}"
+		entry="${entry#*:}"
+		name="${entry%%:*}"
+		lebs="${entry##*:}"
+		[ "$(nand_find_volume ubi0 "$name")" = "ubi0_$id" ] || return 1
+		[ "$(cat /sys/class/ubi/ubi0_$id/reserved_ebs)" = "$lebs" ] || return 1
+		[ "$(cat /sys/class/ubi/ubi0_$id/upd_marker)" = 0 ] || return 1
+		[ "$(cat /sys/class/ubi/ubi0_$id/corrupted)" = 0 ] || return 1
+	done
+	# Do not migrate a mounted factory filesystem, even from a RAM root.
+	! grep -Eq '(^|[ /])(ubi0:rootfs|ubi0_5|ubiblock0_5)([[:space:]]|$)' /proc/mounts
+}
+
 platform_check_image() {
 	ecm30_check_tar "$1" || {
 		echo "Expected an ECM30 sysupgrade archive with Android kernel and SquashFS rootfs." >&2
 		return 1
 	}
-	ecm30_check_layout || {
-		echo "ECM30 factory-compatible writable NAND layout is not ready for sysupgrade." >&2
+	ecm30_check_layout || ecm30_check_factory_layout || {
+		echo "Unsupported ECM30 NAND layout; first installation requires the RAM recovery system." >&2
 		return 1
 	}
 }
@@ -77,7 +107,16 @@ nand_upgrade_prepare_ubi() {
 	[ "$2" = squashfs ] || return 1
 	[ "$1" -gt 0 ] && [ "$1" -le "$ECM30_ROOT_BYTES" ] || return 1
 	[ "$3" -gt 0 ] && [ "$3" -le "$ECM30_BOOT_BYTES" ] || return 1
-	ecm30_check_layout || return 1
+	if ! ecm30_check_layout; then
+		ecm30_check_factory_layout || return 1
+		# Like other ARM NAND targets, migrate during sysupgrade, after image
+		# validation and service shutdown. Never reformat the enclosing UBI.
+		nand_remove_ubiblock ubi0_5 || return 1
+		ubirmvol /dev/ubi0 -N rootfs || return 1
+		ubimkvol /dev/ubi0 -n 5 -N rootfs -s "$ECM30_ROOT_BYTES" || return 1
+		ubimkvol /dev/ubi0 -n 8 -N rootfs_data -m || return 1
+		ecm30_check_layout || return 1
+	fi
 	nand_remove_ubiblock ubi0_5
 }
 

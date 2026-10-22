@@ -79,6 +79,9 @@
   Preserve the factory 8192-byte logical page / 524288-byte eraseblock view.
   Keep boot0, U-Boot and secure storage write-protected; NAND installation and
   upgrades operate on UBI volumes within sys and require verified readback.
+  First installation from the factory layout must use the same LuCI/sysupgrade
+  path from the RAM recovery image; keep migration inside the NAND platform
+  hooks, retain non-system volumes, and never fall back to formatting sys.
   Do not run global `make clean` for routine source-only updates when the build
   checkout has a verified clean baseline. Use it only when the toolchain,
   target, seed configuration, or dependency baseline changed, or when stale

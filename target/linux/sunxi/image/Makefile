@@ -12,7 +12,7 @@ endef
 
 define Build/ecm30-ram-dtb
 	$(LINUX_DIR)/scripts/dtc/dtc -I dtb -O dts -o $@.dts $(KDIR)/image-$(firstword $(DEVICE_DTS)).dtb
-	sed -i 's#bootargs = .*#bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 loglevel=3";#' $@.dts
+	sed -i 's#bootargs = .*#bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 ubi.mtd=sys,4096 loglevel=3";#' $@.dts
 	$(LINUX_DIR)/scripts/dtc/dtc -I dts -O dtb -o $@.dtb $@.dts
 	cat $@.dtb >> $@
 	rm $@.dtb $@.dts
