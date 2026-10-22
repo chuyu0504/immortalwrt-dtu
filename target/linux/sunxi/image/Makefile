@@ -4,6 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/image.mk
 
 define Build/ecm30-android
+	rm -f $@.android $@.json
 	$(STAGING_DIR_HOST)/bin/python3 $(TOPDIR)/scripts/mk-ecm30-bootimg.py \
 		--uimage $@ --dtb $(KDIR)/image-$(firstword $(DEVICE_DTS)).dtb \
 		--rootfs squashfs --output $@.android --report $@.json
