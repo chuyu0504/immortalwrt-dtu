@@ -12,8 +12,7 @@ The independent ECM30 seed is `configs/ebyte-ecm30.config`. Linux 6.12 NAND boot
 the factory 8 KiB / 512 KiB geometry, SquashFS with a UBIFS overlay, and
 configuration-preserving sysupgrade have been verified on hardware. A RAM
 recovery image is built alongside the NAND firmware.
-See [the migration notes](docs/immortalwrt-25.12.2.md) and [AGENTS.md](AGENTS.md)
-for the release workflow.
+See [AGENTS.md](AGENTS.md) for the release workflow.
 
 ImmortalWrt is a fork of [OpenWrt](https://openwrt.org), with more packages ported, more devices supported, default optimized profiles and localization modifications for mainland China users.<br/>
 Compared to upstream, we allow to use (non-upstreamable) modifications/hacks to provide better feature/performance/support.
