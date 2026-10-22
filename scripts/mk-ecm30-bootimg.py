@@ -55,7 +55,10 @@ def unpack_uimage(data, dtb):
     magic, start, end = struct.unpack_from("<3I", kernel, 0x24)
     require((magic, start, end) == (0x016F2818, 0, len(kernel)),
             "ARM zImage extent does not match the kernel payload")
-    return kernel
+    # The verified ARM kernel uses CONFIG_ARM_APPENDED_DTB. Keep its own DTB
+    # so the decompressor does not depend on the vendor bootloader's r2 DTB.
+    # The separate Android DTB remains necessary for the vendor image parser.
+    return payload
 
 
 def build_image(uimage, dtb):
@@ -83,6 +86,7 @@ def build_image(uimage, dtb):
         "input_uimage_sha256": hashlib.sha256(uimage).hexdigest(),
         "kernel_bytes": len(kernel),
         "kernel_sha256": hashlib.sha256(kernel).hexdigest(),
+        "kernel_appended_dtb": True,
         "kernel_address": hex(KERNEL_ADDRESS),
         "stock_staging_address": hex(STOCK_STAGING_ADDRESS),
         "dtb_bytes": len(dtb),
