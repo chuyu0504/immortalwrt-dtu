@@ -231,7 +231,7 @@ if(UNIX)
     target_compile_definitions(edge_log_test PRIVATE
         clock_gettime=edge_log_test_clock_gettime
         EDGE_LOG_ROOT=\"/tmp/edgenode-test-local-diagnostics\"
-        EDGE_LOG_SPACE_PATH=\"/\")
+        EDGE_LOG_SPACE_PATH=\"/tmp\")
     target_compile_options(edge_log_test PRIVATE -UNDEBUG)
     target_include_directories(edge_log_test PRIVATE "${EDGENODE_ROOT}/src")
     target_link_libraries(edge_log_test PRIVATE edgenode_nanopb)
@@ -253,7 +253,7 @@ if(UNIX)
         "${EDGENODE_ROOT}/src/log.c")
     target_compile_definitions(edge_acquisition_test PRIVATE
         EDGE_LOG_ROOT=\"/tmp/edgenode-test-acquisition\"
-        EDGE_LOG_SPACE_PATH=\"/\")
+        EDGE_LOG_SPACE_PATH=\"/tmp\")
     target_include_directories(edge_acquisition_test PRIVATE "${EDGENODE_ROOT}/src")
     target_link_libraries(edge_acquisition_test PRIVATE edgenode_nanopb m)
     add_test(NAME edge_acquisition COMMAND edge_acquisition_test)
