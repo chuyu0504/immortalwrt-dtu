@@ -77,7 +77,7 @@ get_magic_long_tar() {
         setup = '''
 ecm30_check_layout() { return 0; }
 nand_remove_ubiblock() { echo WRITE >> "$LOG"; }
-ecm30_write_volume() { echo WRITE >> "$LOG"; }
+nand_upgrade_tar() { echo WRITE >> "$LOG"; }
 ubirmvol() { echo WRITE >> "$LOG"; }
 '''
         self.assertNotEqual(self.run_shell('platform_do_upgrade "$IMAGE"', setup).returncode, 0)
@@ -87,14 +87,20 @@ ubirmvol() { echo WRITE >> "$LOG"; }
         return '''
 ecm30_check_layout() { return 0; }
 nand_remove_ubiblock() { echo "unblock $1" >> "$LOG"; }
-ecm30_write_volume() {
-    echo "write $3" >> "$LOG"
-    [ "$3" != "''' + failure + '''" ]
+nand_upgrade_tar() {
+    nand_remove_ubiblock ubi0_5
+    echo 'write ubi0_5' >> "$LOG"
+    [ 'ubi0_5' != 'FAIL_VOLUME' ] || return 1
+    echo 'write ubi0_4' >> "$LOG"
+    [ 'ubi0_4' != 'FAIL_VOLUME' ] || return 1
+}
+ecm30_verify_volume() {
+    return 0
 }
 ubirmvol() { echo "remove $*" >> "$LOG"; }
 ubimkvol() { echo "create $*" >> "$LOG"; }
 nand_do_upgrade_success() { echo success >> "$LOG"; }
-'''
+'''.replace('FAIL_VOLUME', failure)
 
     def test_upgrade_only_changes_expected_volumes(self):
         result = self.run_shell('platform_do_upgrade "$IMAGE"', self.flow_setup())

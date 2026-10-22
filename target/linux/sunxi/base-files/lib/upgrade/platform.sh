@@ -71,12 +71,21 @@ platform_check_image() {
 	}
 }
 
-ecm30_write_volume() {
+# Called by the standard nand_upgrade_tar(). These factory boot allocations
+# remain fixed; a failed attach must never trigger a whole-device ubiformat.
+nand_upgrade_prepare_ubi() {
+	[ "$2" = squashfs ] || return 1
+	[ "$1" -gt 0 ] && [ "$1" -le "$ECM30_ROOT_BYTES" ] || return 1
+	[ "$3" -gt 0 ] && [ "$3" -le "$ECM30_BOOT_BYTES" ] || return 1
+	ecm30_check_layout || return 1
+	nand_remove_ubiblock ubi0_5
+}
+
+ecm30_verify_volume() {
 	local file="$1" member="$2" volume="$3" bytes expected actual
 	bytes="$(tar xOf "$file" "$member" | wc -c)"
 	expected="$(tar xOf "$file" "$member" | sha256sum)"
 	expected="${expected%% *}"
-	tar xOf "$file" "$member" | ubiupdatevol "/dev/$volume" -s "$bytes" - || return 1
 	[ "$(cat /sys/class/ubi/$volume/upd_marker)" = 0 ] || return 1
 	[ "$(cat /sys/class/ubi/$volume/corrupted)" = 0 ] || return 1
 	actual="$(head -c "$bytes" "/dev/$volume" | sha256sum)"
@@ -86,10 +95,10 @@ ecm30_write_volume() {
 platform_do_upgrade() {
 	local file="$1"
 	platform_check_image "$file" || return 1
-	# stage2 has switched to RAM. Keep the stock boot/rootfs volume allocations.
-	nand_remove_ubiblock ubi0_5 || return 1
-	ecm30_write_volume "$file" "$ECM30_TAR_DIR/root" ubi0_5 || return 1
-	ecm30_write_volume "$file" "$ECM30_TAR_DIR/kernel" ubi0_4 || return 1
+	# stage2 has switched to RAM; use OpenWrt's common UBI tar writer.
+	nand_upgrade_tar "$file" || return 1
+	ecm30_verify_volume "$file" "$ECM30_TAR_DIR/root" ubi0_5 || return 1
+	ecm30_verify_volume "$file" "$ECM30_TAR_DIR/kernel" ubi0_4 || return 1
 	# Rebuild the overlay and restore only the sysupgrade configuration backup,
 	# avoiding stale overlay binaries, as in the standard NAND updater.
 	ubirmvol /dev/ubi0 -N rootfs_data || return 1

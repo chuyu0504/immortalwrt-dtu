@@ -11,9 +11,9 @@ define Build/ecm30-android
 endef
 
 define Build/ecm30-ram-dtb
-	$(DTC) -I dtb -O dts -o $@.dts $(KDIR)/image-$(firstword $(DEVICE_DTS)).dtb
+	$(LINUX_DIR)/scripts/dtc/dtc -I dtb -O dts -o $@.dts $(KDIR)/image-$(firstword $(DEVICE_DTS)).dtb
 	sed -i 's#bootargs = .*#bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio32,0x02500000 loglevel=3";#' $@.dts
-	$(DTC) -I dts -O dtb -o $@.dtb $@.dts
+	$(LINUX_DIR)/scripts/dtc/dtc -I dts -O dtb -o $@.dtb $@.dts
 	cat $@.dtb >> $@
 	rm $@.dtb $@.dts
 endef
