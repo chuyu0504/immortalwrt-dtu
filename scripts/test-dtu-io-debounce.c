@@ -33,6 +33,15 @@ int main(void)
 	assert(!input.stable);
 	input_sample(&input, false, true, 0, 1260);
 	assert(input.stable);
+	/* ECM30 factory get_di.sh defines high as inactive and low as active. */
+	struct input_state factory = {0};
+	input_sample(&factory, true, true, 20, 2000);
+	assert(factory.raw && !factory.stable);
+	input_sample(&factory, false, true, 20, 2020);
+	assert(!factory.stable);
+	input_sample(&factory, false, true, 20, 2040);
+	assert(!factory.raw && factory.stable);
 	puts("PASS DI bounce rejection, both edges, inversion, recovery and zero delay");
+	puts("PASS ECM30 factory DI polarity: high idle = 0, low active = 1");
 	return 0;
 }

@@ -48,7 +48,7 @@ reject '{"channel":"do0","value":1}'
 reject '{"channel":"do0"}'
 echo 'PASS fixed channel boundary, strict argument types, unavailable AI has no fabricated value'
 before="$(value '@.di[0].value')"
-cfg set dtu_io.di0.inverted=1
+cfg set dtu_io.di0.inverted=0
 cfg set dtu_io.di0.label='Input test'
 cfg commit dtu_io
 ubus call dtu.io reload

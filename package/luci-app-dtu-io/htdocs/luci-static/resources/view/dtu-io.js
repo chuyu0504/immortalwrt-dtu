@@ -31,7 +31,7 @@ function table(columns, rows) {
 }
 
 function digitalValue(channel, input) {
-	return channel.available ? badge(input ? (channel.value ? '1' : '0') :
+	return channel.available ? badge(input ? (channel.value ? '1 · 有效' : '0 · 未触发') :
 		(channel.value ? '1 · 高' : '0 · 低'), channel.value) :
 		E('span', { 'title': channel.error || '' }, [ '不可读' ]);
 }
@@ -85,7 +85,7 @@ return view.extend({
 				]));
 			if (status.volatile_config)
 				children.push(E('div', { 'class': 'alert-message notice' }, [
-					'当前为 RAM 临时运行，IO 设置重启后不保留。正式安装后可持久保存。'
+					'当前为 RAM 临时运行，本插件尚未写入 NAND。'
 				]));
 			children.push(E('h3', [ 'DI · 数字输入' ]), table(
 				[ '通道', '端子', '状态' ], (status.di || []).map(function(ch) {
@@ -112,7 +112,7 @@ return view.extend({
 			children.push(E('h3', [ 'AI · 模拟量输入' ]));
 			if ((status.ai || []).length)
 				children.push(table([ '通道', '端子', '量程', '状态' ], status.ai.map(function(ch) {
-					return [ ch.name, String(ch.terminal), '4～20 mA', '采集协议待适配' ];
+					return [ ch.name, String(ch.terminal), '4～20 mA', '暂不可读' ];
 				})));
 			else
 				children.push(E('p', [ '此设备未提供模拟量输入。' ]));

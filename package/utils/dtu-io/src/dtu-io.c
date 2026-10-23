@@ -76,6 +76,8 @@ static void defaults(struct configuration *next)
 	memset(next, 0, sizeof(*next));
 	for (unsigned int i = 0; i < INPUTS; i++) {
 		snprintf(next->di[i].label, LABEL_SIZE, "%s", inputs[i].name);
+		/* Factory auto_test/get_di.sh: GPIO low = input active. */
+		next->di[i].inverted = true;
 		next->di[i].debounce_ms = 20;
 	}
 	for (unsigned int i = 0; i < OUTPUTS; i++) {
