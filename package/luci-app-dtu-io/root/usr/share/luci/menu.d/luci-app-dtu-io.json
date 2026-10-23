@@ -1,0 +1,8 @@
+{
+	"admin/services/dtu_io": {
+		"title": "设备 IO",
+		"order": 62,
+		"action": { "type": "view", "path": "dtu-io" },
+		"depends": { "acl": [ "luci-app-dtu-io" ], "uci": { "dtu_io": true } }
+	}
+}
