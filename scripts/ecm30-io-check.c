@@ -253,6 +253,9 @@ static int uart_prepare(struct uart_state *state, unsigned int port, bool rs485,
 	    ioctl(state->fd, TIOCGRS485, &state->rs485))
 		return -1;
 	state->saved = true;
+	/* RS485 mode suppresses MCR writes, so leave it before clearing LOOP. */
+	if (ioctl(state->fd, TIOCSRS485, &mode))
+		return -1;
 	/* Disable the UART's internal loop: only the external wire may carry data. */
 	mctrl = state->mctrl & ~TIOCM_LOOP;
 	if (ioctl(state->fd, TIOCMSET, &mctrl) ||
