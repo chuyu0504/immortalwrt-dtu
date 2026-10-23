@@ -132,8 +132,8 @@ static int uart_loopback(int fd, unsigned int port, struct serial_rs485 *saved)
 	cfmakeraw(&configured);
 	configured.c_cflag &= ~(CRTSCTS | HUPCL);
 	configured.c_cflag |= CLOCAL | CREAD;
-	if (port == 1 || port == 3)
-		mode.flags = SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND | SER_RS485_RX_DURING_TX;
+	/* Serial core suppresses ordinary MCR changes while RS485 is enabled.
+	 * Disable it before setting LOOP, then restore the saved board mode. */
 	if (ioctl(fd, TIOCSRS485, &mode))
 		return 1;
 	int loop = mctrl | TIOCM_LOOP;
@@ -239,7 +239,7 @@ static void uart_restore(struct uart_state *state)
 	close(state->fd);
 }
 
-static int uart_prepare(struct uart_state *state, unsigned int port, bool rs485)
+static int uart_prepare(struct uart_state *state, unsigned int port, bool rs485, bool rx_during_tx)
 {
 	char path[32];
 	struct serial_rs485 mode = {0};
@@ -260,13 +260,16 @@ static int uart_prepare(struct uart_state *state, unsigned int port, bool rs485)
 		return -1;
 	if (rs485)
 		mode.flags = SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND;
+	if (rs485 && rx_during_tx)
+		mode.flags |= SER_RS485_RX_DURING_TX;
 	if (ioctl(state->fd, TIOCSRS485, &mode) ||
 	    ioctl(state->fd, TIOCGRS485, &mode))
 		return -1;
 	/* The serial core may retain an RTS polarity flag even with RS485 off. */
 	if (!!(mode.flags & SER_RS485_ENABLED) != rs485 ||
 	    (rs485 && (mode.flags & (SER_RS485_RTS_ON_SEND |
-		SER_RS485_RTS_AFTER_SEND | SER_RS485_RX_DURING_TX)) != SER_RS485_RTS_ON_SEND)) {
+		SER_RS485_RTS_AFTER_SEND | SER_RS485_RX_DURING_TX)) !=
+		(SER_RS485_RTS_ON_SEND | (rx_during_tx ? SER_RS485_RX_DURING_TX : 0)))) {
 		errno = EINVAL;
 		return -1;
 	}
@@ -347,28 +350,42 @@ static int uart_transfer(int source, int destination, unsigned int salt)
 	return tcdrain(source);
 }
 
-static int uart_external_pair(unsigned int first, unsigned int second, bool rs485)
+static int uart_external_pair(unsigned int first, unsigned int second, bool rs485, bool rx_during_tx)
 {
 	struct uart_state states[] = {{.fd = -1}, {.fd = -1}};
 	const speed_t rates[] = {B9600, B115200};
 	int ret = 1;
 
-	if (uart_prepare(&states[0], first, rs485) || uart_prepare(&states[1], second, rs485))
+	if (uart_prepare(&states[0], first, rs485, rx_during_tx) ||
+	    uart_prepare(&states[1], second, rs485, rx_during_tx))
 		goto out;
 	for (unsigned int rate = 0; rate < 2; rate++) {
 		if (uart_set_rate(&states[0], rates[rate]) || uart_set_rate(&states[1], rates[rate]))
 			goto out;
 		for (unsigned int round = 0; round < 4; round++) {
-			if (uart_transfer(states[0].fd, states[1].fd, round * 2) ||
-			    uart_transfer(states[1].fd, states[0].fd, round * 2 + 1))
-				goto out;
+			for (unsigned int direction = 0; direction < 2; direction++) {
+				if (uart_transfer(states[direction].fd, states[1 - direction].fd, round * 2 + direction)) {
+					fprintf(stderr, "Failed ttyS%u -> ttyS%u round=%u\n",
+						direction ? second : first, direction ? first : second, round);
+					goto out;
+				}
+			}
 		}
 		printf("%s external ttyS%u <-> ttyS%u baud=%u 8N1 bytes_per_direction=4096 PASS\n",
 		       rs485 ? "RS485" : "RS232", first, second, rate ? 115200 : 9600);
 	}
 	ret = 0;
 out:
-	if (ret) perror("External UART pair");
+	if (ret) {
+		perror("External UART pair");
+		for (unsigned int i = 0; i < 2; i++) {
+			struct serial_icounter_struct count;
+			if (states[i].fd >= 0 && !ioctl(states[i].fd, TIOCGICOUNT, &count))
+				fprintf(stderr, "ttyS%u tx=%d rx=%d frame=%d parity=%d overrun=%d buffer_overrun=%d\n",
+					i ? second : first, count.tx, count.rx, count.frame, count.parity,
+					count.overrun, count.buf_overrun);
+		}
+	}
 	uart_restore(&states[1]);
 	uart_restore(&states[0]);
 	return ret;
@@ -377,6 +394,7 @@ out:
 int main(int argc, char **argv)
 {
 	bool loopback = false, pulse = false, external = false;
+	bool rs485_only = false, rx_during_tx = false, reverse = false;
 	char compatible[256] = {0};
 	int fd = open("/proc/device-tree/compatible", O_RDONLY | O_CLOEXEC);
 	if (fd < 0 || read(fd, compatible, sizeof(compatible) - 1) <= 0 ||
@@ -392,16 +410,20 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--uart-loopback")) loopback = true;
 		else if (!strcmp(argv[i], "--external-loopback")) external = true;
+		else if (!strcmp(argv[i], "--rs485-only")) rs485_only = external = true;
+		else if (!strcmp(argv[i], "--rs485-rx-during-tx")) rx_during_tx = true;
+		else if (!strcmp(argv[i], "--reverse-first")) reverse = true;
 		else if (!strcmp(argv[i], "--pulse-outputs")) pulse = true;
 		else {
-			fprintf(stderr, "Usage: %s [--uart-loopback] [--external-loopback] [--pulse-outputs]\n", argv[0]);
+			fprintf(stderr, "Usage: %s [--uart-loopback] [--external-loopback|--rs485-only] "
+				"[--rs485-rx-during-tx] [--reverse-first] [--pulse-outputs]\n", argv[0]);
 			return 1;
 		}
 	}
 	int failed = gpio_check(pulse) | uart_check(loopback);
 	if (external) {
-		failed |= uart_external_pair(5, 2, false);
-		failed |= uart_external_pair(1, 3, true);
+		if (!rs485_only) failed |= uart_external_pair(5, 2, false, false);
+		failed |= uart_external_pair(reverse ? 3 : 1, reverse ? 1 : 3, true, rx_during_tx);
 	}
 	puts(failed ? "ECM30 IO check FAIL" : "ECM30 IO check PASS");
 	return failed;
