@@ -1,0 +1,33 @@
+From: ImmortalWrt ECM30 bring-up <ecm30@localhost>
+Subject: [PATCH] serial: 8250: retain the platform's no-TEMT-IRQ capability
+
+dw8250_setup_port() declares UART_CAP_NOTEMT before registering the port.
+On T113 the component parameter register is unavailable, so the port type
+is subsequently probed by autoconfig(). That resets the capabilities to
+the generic 16550A table and loses UART_CAP_NOTEMT.
+
+The software RS485 stop path then waits for a TEMT interrupt which this
+UART does not generate. GPIO RTS remains asserted after the first send,
+preventing the opposite port from replying. Retain the driver's explicit
+timing capability across type detection so the existing 8250 frame timer
+deasserts RTS after the final byte. Keep normal FIFO/type probing intact.
+
+--- a/drivers/tty/serial/8250/8250_port.c
++++ b/drivers/tty/serial/8250/8250_port.c
+@@ -3157,6 +3157,7 @@ static void serial8250_config_port(struct
+ {
+ 	struct uart_8250_port *up = up_to_u8250p(port);
++	unsigned int no_temt_irq = up->capabilities & UART_CAP_NOTEMT;
+ 	int ret;
+ 
+ 	/*
+@@ -3173,6 +3174,9 @@ static void serial8250_config_port(struct
+ 	if (flags & UART_CONFIG_TYPE)
+ 		autoconfig(up);
+ 
++	/* Type detection cannot discover the platform's missing TEMT IRQ. */
++	up->capabilities |= no_temt_irq;
++
+ 	/* HW bugs may trigger IRQ while IIR == NO_INT */
+ 	if (port->type == PORT_TEGRA)
+ 		up->bugs |= UART_BUG_NOMSR;
