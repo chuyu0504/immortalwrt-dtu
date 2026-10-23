@@ -150,11 +150,11 @@ return view.extend({
 						(ch.kind === 'relay' ? '继电器' : '晶体管') + ' / ' + ch.terminal,
 						digitalValue(ch), [
 							E('button', { 'class': 'cbi-button cbi-button-action',
-								'disabled': disabled || ch.value === false,
+								'disabled': disabled || ch.value === false || null,
 								'click': function() { return setOutput(ch, false); }
 							}, [ '置 0' ]), ' ',
 							E('button', { 'class': 'cbi-button cbi-button-action',
-								'disabled': disabled || ch.value === true,
+								'disabled': disabled || ch.value === true || null,
 								'click': function() { return setOutput(ch, true); }
 							}, [ '置 1' ]),
 							ch.controllable ? '' : ' 已锁定'
