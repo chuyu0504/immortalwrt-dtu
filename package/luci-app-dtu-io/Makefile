@@ -23,6 +23,9 @@ define Package/luci-app-dtu-io/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/dtu-io.js \
 		$(1)/www/luci-static/resources/view/dtu-io.js
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/dtu-io
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/dtu-io/format.js \
+		$(1)/www/luci-static/resources/dtu-io/format.js
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-dtu-io.json \
 		$(1)/usr/share/luci/menu.d/luci-app-dtu-io.json

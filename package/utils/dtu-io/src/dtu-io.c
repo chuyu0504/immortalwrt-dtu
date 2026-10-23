@@ -462,10 +462,11 @@ static int status_method(struct ubus_context *ctx, struct ubus_object *object,
 		blobmsg_add_u32(&reply, "terminal", 11 + i);
 		bool fresh = ai_valid && monotonic_ms() - ai_last_read < 5000;
 		blobmsg_add_string(&reply, "range", "4-20 mA");
+		blobmsg_add_string(&reply, "unit", "uA");
 		blobmsg_add_u8(&reply, "available", fresh);
 		if (fresh) {
 			/* Factory mapping AI0->ch4, AI1->ch3, AI2->ch2, AI3->ch1.
-			 * cur_val is the second integer; preserve it without a guessed scale. */
+			 * cur_val is integer microamps; the LuCI view formats it as mA. */
 			blobmsg_add_string(&reply, "value", ai_values.current[3 - i]);
 			blobmsg_add_string(&reply, "original", ai_values.original[3 - i]);
 			blobmsg_add_u32(&reply, "age_ms", monotonic_ms() - ai_last_read);
