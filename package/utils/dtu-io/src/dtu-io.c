@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* One process owns terminal GPIOs. No UART, flash or arbitrary-pin API. */
+/* One owner for terminal GPIOs and the internal ADC UART.
+ * No flash access, arbitrary-pin API or arbitrary serial commands.
+ */
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <fcntl.h>
