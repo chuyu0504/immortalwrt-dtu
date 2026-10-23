@@ -38,15 +38,15 @@ status
 [ "$(value '@.board')" = ECM30 ]
 [ "$(value '@.di[3].id')" = di3 ]
 [ "$(value '@.do[6].id')" = do6 ]
-[ "$(value '@.ai[3].available')" = false ]
-[ -z "$(value '@.ai[0].value')" ]
+[ "$(value '@.ai[3].available')" = true ]
+[ -n "$(value '@.ai[0].value')" ]
 reject '{"channel":"WATCHDOG","value":true}'
 reject '{"channel":"di0","value":true}'
 reject '{"channel":"do7","value":true}'
 reject '{"channel":"do0","value":"1"}'
 reject '{"channel":"do0","value":1}'
 reject '{"channel":"do0"}'
-echo 'PASS fixed channel boundary, strict argument types, unavailable AI has no fabricated value'
+echo 'PASS fixed channel boundary, strict argument types, real AI values available'
 before="$(value '@.di[0].value')"
 cfg set dtu_io.di0.inverted=0
 cfg set dtu_io.di0.label='Input test'

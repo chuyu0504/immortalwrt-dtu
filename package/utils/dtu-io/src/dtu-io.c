@@ -12,12 +12,14 @@
 #include <sys/ioctl.h>
 #include <sys/vfs.h>
 #include <time.h>
+#include <termios.h>
 #include <unistd.h>
 #include <libubus.h>
 #include <libubox/blobmsg.h>
 #include <libubox/uloop.h>
 #include <uci.h>
 #include "debounce.h"
+#include "ai-protocol.h"
 
 #define INPUTS 4
 #define OUTPUTS 7
@@ -58,6 +60,13 @@ static struct input_state state[INPUTS];
 static struct ubus_context *bus;
 static struct blob_buf reply;
 static struct uloop_timeout sample_timer;
+static struct uloop_timeout ai_timer, ai_deadline;
+static struct uloop_fd ai_port = {.fd = -1};
+static struct termios ai_saved_termios;
+static struct ai_reply ai_pending, ai_values;
+static bool ai_valid, ai_waiting;
+static uint64_t ai_last_read;
+static char ai_error[160];
 static int di_fd = -1, do_fd = -1;
 static bool supported, di_valid, do_valid;
 static uint64_t do_bits;
@@ -69,6 +78,110 @@ static uint64_t monotonic_ms(void)
 	struct timespec time;
 	clock_gettime(CLOCK_MONOTONIC, &time);
 	return (uint64_t)time.tv_sec * 1000 + time.tv_nsec / 1000000;
+}
+
+static void ai_close(void)
+{
+	if (ai_port.fd < 0)
+		return;
+	uloop_fd_delete(&ai_port);
+	(void)tcsetattr(ai_port.fd, TCSANOW, &ai_saved_termios);
+	(void)ioctl(ai_port.fd, TIOCNXCL);
+	close(ai_port.fd);
+	ai_port.fd = -1;
+}
+
+static void ai_failure(const char *reason)
+{
+	ai_waiting = ai_valid = false;
+	snprintf(ai_error, sizeof(ai_error), "%s", reason);
+	uloop_timeout_cancel(&ai_deadline);
+}
+
+static void ai_received(struct uloop_fd *port, unsigned int events)
+{
+	(void)events;
+	char data[256];
+	ssize_t count;
+	if (port->error || port->eof) {
+		ai_failure("AI serial device disconnected");
+		ai_close();
+		return;
+	}
+	while ((count = read(port->fd, data, sizeof(data))) > 0) {
+		if (!ai_waiting)
+			continue;
+		ai_feed(&ai_pending, data, count);
+		if (ai_pending.failed) {
+			ai_failure("Invalid AI response");
+			return;
+		}
+		if (ai_complete(&ai_pending)) {
+			ai_values = ai_pending;
+			ai_last_read = monotonic_ms();
+			ai_valid = true;
+			ai_waiting = false;
+			ai_error[0] = 0;
+			uloop_timeout_cancel(&ai_deadline);
+		}
+	}
+	if (count < 0 && errno != EAGAIN && errno != EINTR) {
+		ai_failure("Cannot read AI serial device");
+		ai_close();
+	}
+}
+
+static bool ai_open(void)
+{
+	int fd = open("/dev/ttyS4", O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+	struct termios raw;
+	if (fd < 0)
+		goto fail;
+	if (tcgetattr(fd, &ai_saved_termios) || ioctl(fd, TIOCEXCL)) {
+		close(fd);
+		goto fail;
+	}
+	ai_port.fd = fd;
+	raw = ai_saved_termios;
+	cfmakeraw(&raw);
+	raw.c_cflag &= ~(CRTSCTS | HUPCL);
+	raw.c_cflag |= CLOCAL | CREAD;
+	cfsetispeed(&raw, B9600);
+	cfsetospeed(&raw, B9600);
+	ai_port.cb = ai_received;
+	if (tcsetattr(fd, TCSANOW, &raw) || uloop_fd_add(&ai_port, ULOOP_READ)) {
+		ai_close();
+		goto fail;
+	}
+	return true;
+fail:
+	ai_failure("AI serial device unavailable or busy");
+	return false;
+}
+
+static void ai_timeout(struct uloop_timeout *timer)
+{
+	(void)timer;
+	ai_failure("AI response timeout");
+}
+
+static void ai_query(struct uloop_timeout *timer)
+{
+	const char command[] = "AT+AIREAD\r\n";
+	uloop_timeout_set(timer, 2000);
+	if (!supported || hardware_error[0])
+		return;
+	if (ai_port.fd < 0 && !ai_open())
+		return;
+	memset(&ai_pending, 0, sizeof(ai_pending));
+	if (tcflush(ai_port.fd, TCIFLUSH) ||
+	    write(ai_port.fd, command, sizeof(command) - 1) != (ssize_t)sizeof(command) - 1) {
+		ai_failure("Cannot query AI serial device");
+		ai_close();
+		return;
+	}
+	ai_waiting = true;
+	uloop_timeout_set(&ai_deadline, 1000);
 }
 
 static void defaults(struct configuration *next)
@@ -345,9 +458,18 @@ static int status_method(struct ubus_context *ctx, struct ubus_object *object,
 		item = blobmsg_open_table(&reply, NULL);
 		blobmsg_add_string(&reply, "name", id);
 		blobmsg_add_u32(&reply, "terminal", 11 + i);
-		blobmsg_add_string(&reply, "unit", "mA");
-		blobmsg_add_u8(&reply, "available", false);
-		blobmsg_add_string(&reply, "reason", "protocol_unverified");
+		bool fresh = ai_valid && monotonic_ms() - ai_last_read < 5000;
+		blobmsg_add_string(&reply, "range", "4-20 mA");
+		blobmsg_add_u8(&reply, "available", fresh);
+		if (fresh) {
+			/* Factory mapping AI0->ch4, AI1->ch3, AI2->ch2, AI3->ch1.
+			 * cur_val is the second integer; preserve it without a guessed scale. */
+			blobmsg_add_string(&reply, "value", ai_values.current[3 - i]);
+			blobmsg_add_string(&reply, "original", ai_values.original[3 - i]);
+			blobmsg_add_u32(&reply, "age_ms", monotonic_ms() - ai_last_read);
+		} else {
+			blobmsg_add_string(&reply, "error", ai_error[0] ? ai_error : "Waiting for AI response");
+		}
 		blobmsg_close_table(&reply, item);
 	}
 	blobmsg_close_array(&reply, array);
@@ -470,10 +592,16 @@ int main(int argc, char **argv)
 	hardware_init();
 	sample_timer.cb = sample;
 	sample(&sample_timer);
+	ai_timer.cb = ai_query;
+	ai_deadline.cb = ai_timeout;
+	uloop_timeout_set(&ai_timer, 1);
 	uloop_run();
 	result = 0;
 out:
 	uloop_timeout_cancel(&sample_timer);
+	uloop_timeout_cancel(&ai_timer);
+	uloop_timeout_cancel(&ai_deadline);
+	ai_close();
 	if (do_fd >= 0) {
 		struct gpio_v2_line_values off = {.mask = (1U << OUTPUTS) - 1};
 		if (ioctl(do_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &off) < 0)

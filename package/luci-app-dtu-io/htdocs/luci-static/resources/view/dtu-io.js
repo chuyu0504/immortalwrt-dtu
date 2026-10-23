@@ -111,8 +111,9 @@ return view.extend({
 				})));
 			children.push(E('h3', [ 'AI · 模拟量输入' ]));
 			if ((status.ai || []).length)
-				children.push(table([ '通道', '端子', '量程', '状态' ], status.ai.map(function(ch) {
-					return [ ch.name, String(ch.terminal), '4～20 mA', '暂不可读' ];
+				children.push(table([ '通道', '端子', '量程', '当前值' ], status.ai.map(function(ch) {
+					return [ ch.name, String(ch.terminal), '4～20 mA',
+						ch.available ? String(ch.value) : E('span', { 'title': ch.error || '' }, [ '读取失败' ]) ];
 				})));
 			else
 				children.push(E('p', [ '此设备未提供模拟量输入。' ]));
