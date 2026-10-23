@@ -133,6 +133,10 @@ return view.extend({
 				children.push(E('div', { 'class': 'alert-message warning' }, [
 					status.error || ('配置未生效：' + status.config_error)
 				]));
+			if (status.volatile_config)
+				children.push(E('div', { 'class': 'alert-message notice' }, [
+					'当前为 RAM 临时运行，IO 设置重启后不保留。正式安装后可持久保存。'
+				]));
 			children.push(E('h3', [ 'DI · 数字输入' ]), table(
 				[ '通道', '名称', '端子', '状态', '原始电平' ], (status.di || []).map(function(ch) {
 					return [ ch.name, ch.label, String(ch.terminal), digitalValue(ch, true),

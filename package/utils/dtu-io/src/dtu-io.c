@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/vfs.h>
 #include <time.h>
 #include <unistd.h>
 #include <libubus.h>
@@ -307,6 +308,10 @@ static int status_method(struct ubus_context *ctx, struct ubus_object *object,
 	blobmsg_add_u32(&reply, "sample_ms", SAMPLE_MS);
 	blobmsg_add_string(&reply, "error", hardware_error);
 	blobmsg_add_string(&reply, "config_error", config_error);
+	struct statfs config_fs;
+	bool volatile_config = !statfs(config_directory ? config_directory : "/etc/config", &config_fs) &&
+		(config_fs.f_type == 0x01021994 || (unsigned long)config_fs.f_type == 0x858458f6);
+	blobmsg_add_u8(&reply, "volatile_config", volatile_config); /* tmpfs or ramfs */
 	array = blobmsg_open_array(&reply, "di");
 	for (unsigned int i = 0; supported && i < INPUTS; i++) {
 		item = blobmsg_open_table(&reply, NULL);
