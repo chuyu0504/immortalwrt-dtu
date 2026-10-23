@@ -4,8 +4,6 @@
 'require poll';
 'require dom';
 'require ui';
-'require uci';
-'require form';
 
 var callStatus = rpc.declare({ object: 'dtu.io', method: 'status', reject: true, expect: {} });
 var callOutput = rpc.declare({
@@ -38,60 +36,13 @@ function digitalValue(channel, input) {
 		E('span', { 'title': channel.error || '' }, [ '不可读' ]);
 }
 
-function configurationMap(status) {
-	var map = new form.Map('dtu_io', '通道设置',
-		'保存并应用后生效；通道设置会随“保留配置”升级保存。');
-	var inputs = status.di || [], outputs = status.do || [];
-
-	function section(type, title, channels) {
-		var section = map.section(form.TableSection, type, title);
-		section.anonymous = true;
-		section.addremove = false;
-		section.cfgsections = function() {
-			return channels.map(function(channel) { return channel.id; });
-		};
-		var option = section.option(form.DummyValue, '_channel', '通道');
-		option.cfgvalue = function(id) {
-			var channel = channels.find(function(item) { return item.id === id; });
-			return channel.name + ' · 端子 ' + channel.terminal;
-		};
-		option = section.option(form.Value, 'label', '名称');
-		option.rmempty = false;
-		option.validate = function(id, value) {
-			return value && value.length <= 32 && !/[\x00-\x1f\x7f]/.test(value) ||
-				'请输入 1～32 个字符，不含控制字符';
-		};
-		return section;
-	}
-
-	var s = section('input', 'DI · 数字输入', inputs);
-	var o = s.option(form.Flag, 'inverted', '反相');
-	o.rmempty = false;
-	o.default = '0';
-	o.description = '勾选后，高电平显示为 0，低电平显示为 1。';
-	o = s.option(form.Value, 'debounce_ms', '消抖（毫秒）');
-	o.datatype = 'and(uinteger,range(0,1000))';
-	o.rmempty = false;
-	o.default = '20';
-	o.description = '每 20 毫秒采样；用于状态监视，不用于高速脉冲计数。';
-
-	s = section('output', 'DO · 数字输出', outputs);
-	o = s.option(form.ListValue, 'startup', '服务启动时输出');
-	o.value('0', '0 · 低');
-	o.value('1', '1 · 高');
-	o.rmempty = false;
-	o.default = '0';
-	o.description = '下次开机或 IO 服务重新启动时生效；保存设置不会切换当前输出。';
-	o = s.option(form.Flag, 'controllable', '允许手动控制');
-	o.rmempty = false;
-	o.default = '1';
-	o.description = '关闭后拒绝手动写入，当前输出保持不变。';
-	return map;
-}
-
 return view.extend({
+	handleSave: null,
+	handleSaveApply: null,
+	handleReset: null,
+
 	load: function() {
-		return Promise.all([ uci.load('dtu_io'), L.resolveDefault(callStatus(), null) ]);
+		return L.resolveDefault(callStatus(), null);
 	},
 
 	render: function(data) {
@@ -126,8 +77,7 @@ return view.extend({
 			}
 			var children = [ E('h2', [ '设备 IO · ' + status.board ]),
 				E('p', { 'class': 'cbi-section-descr' }, [
-					'每秒刷新状态。DI 默认按高电平为 1 显示，可按实际接线设置反相；' +
-					'DO 显示驱动电平回读，不代表外部负载或继电器触点反馈。'
+					'每秒刷新。DO 状态为驱动电平回读，不含外部触点反馈。'
 				]) ];
 			if (status.error || status.config_error)
 				children.push(E('div', { 'class': 'alert-message warning' }, [
@@ -138,15 +88,14 @@ return view.extend({
 					'当前为 RAM 临时运行，IO 设置重启后不保留。正式安装后可持久保存。'
 				]));
 			children.push(E('h3', [ 'DI · 数字输入' ]), table(
-				[ '通道', '名称', '端子', '状态', '原始电平' ], (status.di || []).map(function(ch) {
-					return [ ch.name, ch.label, String(ch.terminal), digitalValue(ch, true),
-						ch.available ? (ch.raw ? '高' : '低') : '—' ];
+				[ '通道', '端子', '状态' ], (status.di || []).map(function(ch) {
+					return [ ch.name, String(ch.terminal), digitalValue(ch, true) ];
 				})));
 			children.push(E('h3', [ 'DO · 数字输出' ]), table(
-				[ '通道', '名称', '类型 / 端子', '当前输出', '手动控制' ], (status.do || []).map(function(ch) {
+				[ '通道', '类型 / 端子', '当前输出', '控制' ], (status.do || []).map(function(ch) {
 					var disabled = readOnly || !ch.available || !ch.controllable ||
 						!!status.config_error || !!pending[ch.id];
-					return [ ch.name, ch.label,
+					return [ ch.name,
 						(ch.kind === 'relay' ? '继电器' : '晶体管') + ' / ' + ch.terminal,
 						digitalValue(ch), [
 							E('button', { 'class': 'cbi-button cbi-button-action',
@@ -167,17 +116,10 @@ return view.extend({
 				})));
 			else
 				children.push(E('p', [ '此设备未提供模拟量输入。' ]));
-			children.push(E('h3', [ 'AO · 模拟量输出' ]), E('p', [ '此设备未提供模拟量输出。' ]));
 			dom.content(statusNode, children);
 		}
-		renderStatus(data[1]);
+		renderStatus(data);
 		poll.add(refresh, 1);
-		if (!data[1] || !data[1].supported) {
-			this.handleSave = this.handleSaveApply = this.handleReset = null;
-			return statusNode;
-		}
-		return configurationMap(data[1]).render().then(function(configuration) {
-			return E([], [ statusNode, configuration ]);
-		});
+		return statusNode;
 	}
 });

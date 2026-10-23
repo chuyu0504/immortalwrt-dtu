@@ -1,12 +1,10 @@
 {
 	"luci-app-dtu-io": {
-		"description": "View and configure device terminal I/O",
+		"description": "View device I/O and control digital outputs",
 		"read": {
-			"uci": [ "dtu_io" ],
 			"ubus": { "dtu.io": [ "status" ] }
 		},
 		"write": {
-			"uci": [ "dtu_io" ],
 			"ubus": { "dtu.io": [ "set_output" ] }
 		}
 	}

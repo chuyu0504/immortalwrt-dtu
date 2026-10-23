@@ -12,7 +12,7 @@ define Package/luci-app-dtu-io
   SECTION:=luci
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
-  TITLE:=LuCI device I/O status and configuration
+  TITLE:=LuCI device I/O status and output control
   DEPENDS:=+luci-base +dtu-io
 endef
 
