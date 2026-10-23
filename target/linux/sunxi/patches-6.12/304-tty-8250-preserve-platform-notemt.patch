@@ -14,13 +14,14 @@ deasserts RTS after the final byte. Keep normal FIFO/type probing intact.
 
 --- a/drivers/tty/serial/8250/8250_port.c
 +++ b/drivers/tty/serial/8250/8250_port.c
-@@ -3157,6 +3157,7 @@ static void serial8250_config_port(struct
+@@ -3158,6 +3158,7 @@ static void serial8250_config_port(struct
  {
  	struct uart_8250_port *up = up_to_u8250p(port);
 +	unsigned int no_temt_irq = up->capabilities & UART_CAP_NOTEMT;
  	int ret;
  
  	/*
+ 	 * Find the region that we can probe for.  This in turn
 @@ -3173,6 +3174,9 @@ static void serial8250_config_port(struct
  	if (flags & UART_CONFIG_TYPE)
  		autoconfig(up);
