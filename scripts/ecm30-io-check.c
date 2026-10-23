@@ -263,7 +263,10 @@ static int uart_prepare(struct uart_state *state, unsigned int port, bool rs485)
 	if (ioctl(state->fd, TIOCSRS485, &mode) ||
 	    ioctl(state->fd, TIOCGRS485, &mode))
 		return -1;
-	if (mode.flags != (rs485 ? SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND : 0)) {
+	/* The serial core may retain an RTS polarity flag even with RS485 off. */
+	if (!!(mode.flags & SER_RS485_ENABLED) != rs485 ||
+	    (rs485 && (mode.flags & (SER_RS485_RTS_ON_SEND |
+		SER_RS485_RTS_AFTER_SEND | SER_RS485_RX_DURING_TX)) != SER_RS485_RTS_ON_SEND)) {
 		errno = EINVAL;
 		return -1;
 	}
