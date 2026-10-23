@@ -3,13 +3,26 @@
 [ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = 'ebyte,ecm30' ] || exit 0
 [ -f /etc/config/edgenode ] || exit 0
 
-# These are board defaults; existing deployed platforms keep their own config.
+# Preinit keeps this archive until S95done. Restored user settings must not
+# be replaced by board defaults on every firmware upgrade.
+if [ -f /sysupgrade.tgz ] || [ -f /tmp/sysupgrade.tar ]; then
+	# Earlier ECM30 images selected the fixed RS485 connector with RS485 off.
+	# Migrate that combination without changing a user-selected RS232 port.
+	if [ "$(uci -q get edgenode.hardware.serial_port)" = '/dev/ttyS1' ] &&
+	   [ "$(uci -q get edgenode.hardware.serial_rs485)" = '0' ]; then
+		uci -q set edgenode.hardware.serial_rs485='1'
+		uci -q commit edgenode
+	fi
+	exit 0
+fi
+
+# First-boot board defaults; platform enrollment has its own defaults hook.
 uci -q batch <<'EOF'
 set edgenode.modem.usb_vendor='2c7c'
 set edgenode.modem.usb_product='0901'
 set edgenode.modem.at_port='/dev/ttyUSB0'
 set edgenode.hardware.serial_port='/dev/ttyS1'
-set edgenode.hardware.serial_rs485='0'
+set edgenode.hardware.serial_rs485='1'
 set edgenode.hardware.lan_interface='br-lan'
 set edgenode.hardware.wan_interface='usb0'
 commit edgenode
