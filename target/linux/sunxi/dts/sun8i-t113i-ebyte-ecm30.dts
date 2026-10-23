@@ -121,7 +121,7 @@
 	 * Leave the application I/O lines free for the standard GPIO chardev.
 	 */
 	gpio-line-names =
-+		/* PA0-PA31 */
+		/* PA0-PA31 */
 		"", "", "", "", "", "", "", "",
 		"", "", "", "", "", "", "", "",
 		"", "", "", "", "", "", "", "",
