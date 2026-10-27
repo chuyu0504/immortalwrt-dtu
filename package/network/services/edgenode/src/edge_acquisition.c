@@ -94,6 +94,18 @@ struct edge_acquisition_device {
     uint8_t acquisition_id[16];
     bool acquisition_active;
     bool raw_telemetry;
+    bool external_io_enabled;
+    uint8_t configuration_digest[32];
+    const iot_edge_v1_ExternalIoPointConfig *external_io[15];
+    size_t external_io_count;
+    uint64_t external_io_next_ms;
+    uint64_t external_io_retry_ms;
+    uint8_t *external_io_pending;
+    size_t external_io_pending_size;
+    uint8_t external_io_pending_id[16];
+    bool external_io_unavailable;
+    iot_edge_v1_CommandResult *external_io_result;
+    uint64_t external_io_result_retry_ms;
     iot_edge_v1_RawPacket *debug_request;
     uint8_t received_packet_id[16];
     int64_t received_packet_time;
@@ -178,6 +190,15 @@ typedef struct {
 
 struct edge_acquisition {
     edge_acquisition_dtu_callback dtu_callback;
+    edge_acquisition_io_callback io_callback;
+    edge_external_io_snapshot io_capability;
+    bool io_capability_seen;
+    bool io_connected;
+    uint64_t io_reconnect_ms;
+    bool io_quiesce_requested;
+    bool io_quiesce_sent;
+    bool io_quiesced_ack;
+    uint64_t io_quiesce_token;
     edge_dtu_channel dtu[EDGE_DTU_MAX_CHANNELS];
     size_t dtu_count;
     edge_acquisition_serial_callback serial_callback;
@@ -205,6 +226,15 @@ struct edge_acquisition {
 };
 
 typedef enum {
+    EDGE_ACQUISITION_EVENT_EXTERNAL_IO = 14,
+    EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_COMMIT = 15,
+    EDGE_ACQUISITION_EVENT_IO_CAPABILITY = 16,
+    EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_ENABLE = 17,
+    EDGE_ACQUISITION_EVENT_EXTERNAL_IO_COMMAND = 18,
+    EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_COMMAND_COMMIT = 19,
+    EDGE_ACQUISITION_CONTROL_IO_QUIESCE = 20,
+    EDGE_ACQUISITION_CONTROL_IO_RESUME = 21,
+    EDGE_ACQUISITION_EVENT_IO_QUIESCED = 22,
     EDGE_ACQUISITION_CONTROL_RAW_TELEMETRY = 13,
     EDGE_ACQUISITION_EVENT_DTU = 12,
     EDGE_ACQUISITION_CONTROL_SERIAL = 10,
@@ -239,6 +269,7 @@ typedef struct {
         iot_edge_v1_SerialDebugRequest serial_request;
         iot_edge_v1_SerialDebugEvent serial_event;
         iot_edge_v1_DtuStatus dtu_status;
+        edge_external_io_snapshot io_capability;
     } payload;
 } edge_acquisition_message;
 
@@ -2793,6 +2824,10 @@ static void sl651_poll(edge_acquisition_device *device, uint64_t now) {
 static bool publish_acquisition_cycle(edge_acquisition_device *device,
                                        const uint8_t platform_id[16],
                                        iot_edge_v1_TelemetryRecord *record) {
+    if (device->external_io_enabled) {
+        record->configuration_sha256.size = 32U;
+        memcpy(record->configuration_sha256.bytes, device->configuration_digest, 32U);
+    }
     size_t encoded = 0;
     if (!pb_get_encoded_size(&encoded, iot_edge_v1_TelemetryRecord_fields, record))
         return false;
@@ -3082,6 +3117,8 @@ static void free_devices(edge_acquisition_device *devices, size_t count) {
         release_response(devices[index].read_response);
         free(devices[index].sl651_request);
         free(devices[index].debug_request);
+        free(devices[index].external_io_pending);
+        free(devices[index].external_io_result);
         if (devices[index].derived_pending) { free(devices[index].derived_pending->values); free(devices[index].derived_pending); }
         edge_derived_free(devices[index].derived);
         free(devices[index].points);
@@ -3107,6 +3144,14 @@ void edge_acquisition_set_debug_callback(edge_acquisition *acquisition, edge_acq
 
 void edge_acquisition_set_dtu_callback(edge_acquisition *acquisition, edge_acquisition_dtu_callback callback) {
     if (acquisition) acquisition->dtu_callback = callback;
+}
+
+void edge_acquisition_set_io_callback(edge_acquisition *acquisition, edge_acquisition_io_callback callback) {
+    if (acquisition) acquisition->io_callback = callback;
+}
+
+const edge_external_io_snapshot *edge_acquisition_io_capability(const edge_acquisition *acquisition) {
+    return acquisition ? &acquisition->io_capability : NULL;
 }
 
 void edge_acquisition_enable_serial_debug(edge_acquisition *acquisition, const char *path,
@@ -3350,6 +3395,30 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
             runtime->endpoint = endpoint;
             runtime->config = device;
             runtime->raw_telemetry = source->raw_telemetry;
+            runtime->external_io_enabled = source->external_io;
+            memcpy(runtime->configuration_digest, config->digest, sizeof(runtime->configuration_digest));
+            runtime->external_io_next_ms = now_ms;
+            for (uint32_t io_index = 0; io_index < config->item_count; ++io_index) {
+                const iot_edge_v1_ConfigItem *entry = &config->items[io_index];
+                if (entry->which_item != iot_edge_v1_ConfigItem_external_io_tag ||
+                    memcmp(entry->item.external_io.device_id.bytes, device->device_id.bytes, 16U)) continue;
+                const iot_edge_v1_ExternalIoPointConfig *point = &entry->item.external_io;
+                if (runtime->external_io_count == 15U ||
+                    (runtime->external_io_count && memcmp(runtime->external_io[0]->model_id.bytes, point->model_id.bytes, 16U))) {
+                    free_devices(devices, output + 1U); free_links(links, link_count);
+                    set_error(error, error_size, "invalid external IO model or point count"); return false;
+                }
+                if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO) {
+                    for (size_t previous = 0; previous < output; ++previous)
+                        for (size_t p = 0; p < devices[previous].external_io_count; ++p)
+                            if (devices[previous].external_io[p]->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO &&
+                                !strcmp(devices[previous].external_io[p]->channel, point->channel)) {
+                                free_devices(devices, output + 1U); free_links(links, link_count);
+                                set_error(error, error_size, "external IO output belongs to another device or platform"); return false;
+                            }
+                }
+                runtime->external_io[runtime->external_io_count++] = point;
+            }
             runtime->derived = edge_derived_create(config, device->device_id.bytes);
             runtime->derived_deadline = INT64_MAX;
             for (uint32_t i = 0; i < config->item_count; ++i) {
@@ -3527,7 +3596,7 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
         acquisition->cached_status[index] =
             (iot_edge_v1_DeviceStatusReport)iot_edge_v1_DeviceStatusReport_init_zero;
     }
-    acquisition->worker_required = dtu_count != 0U || output != 0U || acquisition->serial_path[0] != '\0';
+    acquisition->worker_required = dtu_count != 0U || output != 0U || acquisition->serial_path[0] != '\0' || access("/etc/init.d/dtu-io", X_OK) == 0;
     char detail[96];
     snprintf(detail, sizeof(detail), "platforms=%zu devices=%zu resources=%zu",
              source_count, output, link_count);
@@ -3956,7 +4025,12 @@ static bool worker_sl651_report(edge_acquisition_device *device,
     message.report_part = part;
     pb_ostream_t stream =
         pb_ostream_from_buffer(message.payload.telemetry, sizeof(message.payload.telemetry));
-    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, record)) {
+    iot_edge_v1_TelemetryRecord stamped = *record;
+    if (device->external_io_enabled) {
+        stamped.configuration_sha256.size = 32U;
+        memcpy(stamped.configuration_sha256.bytes, device->configuration_digest, 32U);
+    }
+    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, &stamped)) {
         edge_log_local_fault(device->platform_id, device->config->device_id.bytes,
                              (unsigned)device->config->protocol,
                              EDGE_LOCAL_FAULT_WORKER_ENCODE, 1U);
@@ -4001,7 +4075,14 @@ static bool worker_telemetry(void *context,
                              const iot_edge_v1_TelemetryRecord *record) {
     uint8_t wire[EDGENODE_MAX_WS_MESSAGE];
     pb_ostream_t stream = pb_ostream_from_buffer(wire, sizeof(wire));
-    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, record)) {
+    iot_edge_v1_TelemetryRecord stamped = *record;
+    edge_acquisition_device *device = record->device_id.size == 16U
+        ? find_device(context, platform_id, record->device_id.bytes) : NULL;
+    if (device && device->external_io_enabled) {
+        stamped.configuration_sha256.size = 32U;
+        memcpy(stamped.configuration_sha256.bytes, device->configuration_digest, 32U);
+    }
+    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, &stamped)) {
         syslog(LOG_ERR, "cannot encode complete telemetry record: %s", PB_GET_ERROR(&stream));
         edge_log_local_fault(platform_id,
                              record->device_id.size == 16U ? record->device_id.bytes : NULL,
@@ -4339,6 +4420,71 @@ static void set_device_telemetry_format(edge_acquisition_device *device, bool ra
     }
 }
 
+static const iot_edge_v1_ExternalIoPointConfig *external_io_command_point(edge_acquisition_device *device,
+                                                                          const iot_edge_v1_CommandRequest *request) {
+    if (!device || !device->external_io_enabled || !request || !request->external_io ||
+        request->command_id.size != 16U || request->values_count != 1U || !request->values[0].has_expected ||
+        request->values[0].expected.which_value != iot_edge_v1_ScalarValue_string_value_tag ||
+        (strcmp(request->values[0].expected.value.string_value, "0") && strcmp(request->values[0].expected.value.string_value, "1"))) return NULL;
+    for (size_t i = 0; i < device->external_io_count; ++i)
+        if (device->external_io[i]->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO &&
+            !strcmp(device->external_io[i]->point_id, request->values[0].element_id)) return device->external_io[i];
+    return NULL;
+}
+
+typedef struct {
+    edge_acquisition *acquisition;
+    const uint8_t *platform_id;
+    uint64_t deadline;
+    uint64_t mapping_valid_until;
+    uint32_t generation;
+} external_io_write_guard;
+
+static bool external_io_write_permitted(void *context) {
+    const external_io_write_guard *guard = context;
+    const uint64_t now = monotonic_milliseconds();
+    return now && now < guard->deadline && now < guard->mapping_valid_until &&
+        command_clock_generation_is_current(guard->acquisition, guard->platform_id, guard->generation);
+}
+
+static bool external_io_command(edge_acquisition *acquisition, const edge_acquisition_message *message) {
+    const iot_edge_v1_CommandRequest *request = &message->payload.command_request;
+    edge_acquisition_device *device = request->device_id.size == 16U ? find_device(acquisition, message->platform_id, request->device_id.bytes) : NULL;
+    const iot_edge_v1_ExternalIoPointConfig *point = external_io_command_point(device, request);
+    if (!point || device->external_io_result || acquisition->io_quiesce_requested) return false;
+    external_io_write_guard guard = { acquisition, message->platform_id, message->command_start_before_monotonic_ms,
+                                     message->mapping_valid_until_monotonic_ms, message->command_clock_generation };
+    if (!external_io_write_permitted(&guard)) return false;
+    iot_edge_v1_CommandResult *result = calloc(1, sizeof(*result));
+    if (!result) return false;
+    if (!edge_device_runtime_claim_command_id(&device->runtime, request->command_id.bytes)) { free(result); return false; }
+    result->command_id.size = result->device_id.size = 16U;
+    memcpy(result->command_id.bytes, request->command_id.bytes, 16U);
+    memcpy(result->device_id.bytes, request->device_id.bytes, 16U);
+    const bool expected = !strcmp(request->values[0].expected.value.string_value, "1");
+    bool started = false, actual = false;
+    const bool success = edge_external_io_write(NULL, point->channel, expected, external_io_write_permitted, &guard, &started, &actual);
+    result->state = success ? iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED :
+        started ? iot_edge_v1_CommandState_COMMAND_STATE_FAILED : iot_edge_v1_CommandState_COMMAND_STATE_REJECTED;
+    result->write_ack_missing = started && !success;
+    result->completed_at_ms = current_ms();
+    copy_text(result->message, sizeof(result->message), success ? "external IO output readback confirmed" :
+              started ? "external IO write result is uncertain" : "external IO write was not started");
+    if (success) {
+        result->actual_values_count = 1U;
+        iot_edge_v1_TelemetryValue *value = &result->actual_values[0];
+        copy_text(value->element_id, sizeof(value->element_id), point->point_id);
+        copy_text(value->name, sizeof(value->name), point->name);
+        value->has_value = true;
+        value->value.kind = iot_edge_v1_ValueKind_VALUE_BOOL;
+        value->value.which_value = iot_edge_v1_ScalarValue_bool_value_tag;
+        value->value.value.bool_value = actual;
+    }
+    device->external_io_result = result;
+    device->external_io_result_retry_ms = 0;
+    return true;
+}
+
 static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
     edge_acquisition_message message;
     const ssize_t size = recv(acquisition->worker_fd, &message, sizeof(message),
@@ -4354,6 +4500,40 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
         message.payload_size > sizeof(message.payload) ||
         acquisition_message_size(message.payload_size) != (size_t)size)
         return false;
+    if (message.type == EDGE_ACQUISITION_CONTROL_IO_QUIESCE && message.payload_size == 0U) {
+        acquisition->io_quiesce_requested = true;
+        acquisition->io_quiesce_sent = false;
+        acquisition->io_quiesce_token = message.report_token;
+        return true;
+    }
+    if (message.type == EDGE_ACQUISITION_CONTROL_IO_RESUME && message.payload_size == 0U) {
+        acquisition->io_quiesce_requested = false;
+        acquisition->io_quiesce_sent = false;
+        return true;
+    }
+    if (message.type == EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_ENABLE && message.payload_size == 1) {
+        for (size_t i = 0; i < acquisition->device_count; ++i)
+            if (!memcmp(acquisition->devices[i].platform_id, message.platform_id, 16U))
+                acquisition->devices[i].external_io_enabled = message.payload.telemetry[0] != 0;
+        return true;
+    }
+    if (message.type == EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_COMMIT && message.payload_size == 16U) {
+        edge_acquisition_device *device = find_device(acquisition, message.platform_id, message.device_id);
+        if (device && device->external_io_pending && !memcmp(device->external_io_pending_id, message.payload.telemetry, 16U)) {
+            free(device->external_io_pending);
+            device->external_io_pending = NULL;
+            device->external_io_pending_size = 0;
+        }
+        return true;
+    }
+    if (message.type == EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_COMMAND_COMMIT && message.payload_size == 16U) {
+        edge_acquisition_device *device = find_device(acquisition, message.platform_id, message.device_id);
+        if (device && device->external_io_result && !memcmp(device->external_io_result->command_id.bytes, message.payload.telemetry, 16U)) {
+            free(device->external_io_result);
+            device->external_io_result = NULL;
+        }
+        return true;
+    }
     if (message.type == EDGE_ACQUISITION_CONTROL_RAW_TELEMETRY && message.payload_size == 1) {
         for (size_t i = 0; i < acquisition->device_count; ++i)
             if (!memcmp(acquisition->devices[i].platform_id, message.platform_id, 16))
@@ -4417,6 +4597,11 @@ static bool worker_receive_control(edge_acquisition *acquisition, bool *stop) {
         message.payload_size != sizeof(message.payload.command_request))
         return false;
     char error[256] = {0};
+    if (message.payload.command_request.external_io) {
+        if (!external_io_command(acquisition, &message))
+            worker_send_command_failure(acquisition, message.platform_id, &message.payload.command_request, "external IO command rejected");
+        return true;
+    }
     if (!acquisition_command_local(acquisition, message.platform_id,
                                    &message.payload.command_request,
                                    message.command_start_before_monotonic_ms,
@@ -4445,6 +4630,22 @@ bool edge_acquisition_set_raw_telemetry(edge_acquisition *acquisition,
     for (size_t i = 0; i < acquisition->device_count; ++i)
         if (!memcmp(acquisition->devices[i].platform_id, platform_id, 16))
             set_device_telemetry_format(&acquisition->devices[i], enabled);
+    return true;
+}
+
+bool edge_acquisition_set_external_io(edge_acquisition *acquisition,
+                                      const uint8_t platform_id[16], bool enabled) {
+    if (!acquisition || !platform_id) return false;
+    if (acquisition->worker_pid > 0) {
+        edge_acquisition_message message = {.magic = EDGE_ACQUISITION_MAGIC,
+            .type = EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_ENABLE, .payload_size = 1};
+        memcpy(message.platform_id, platform_id, 16U);
+        message.payload.telemetry[0] = enabled ? 1 : 0;
+        if (send(acquisition->worker_fd, &message, acquisition_message_size(1), MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)acquisition_message_size(1)) return false;
+    }
+    for (size_t i = 0; i < acquisition->device_count; ++i)
+        if (!memcmp(acquisition->devices[i].platform_id, platform_id, 16U))
+            acquisition->devices[i].external_io_enabled = enabled;
     return true;
 }
 
@@ -4491,6 +4692,136 @@ static void dtu_supervise(edge_acquisition *acquisition, uint64_t now) {
                                  EDGE_LOCAL_FAULT_DTU, 4U);
             channel->pid = 0;
             channel->retry_at = now + 1000;
+        }
+    }
+}
+
+static bool io_capability_changed(const edge_external_io_snapshot *left, const edge_external_io_snapshot *right) {
+    if (left->supported != right->supported || left->count != right->count) return true;
+    for (size_t i = 0; i < left->count; ++i) {
+        const edge_external_io_channel *a = &left->channels[i], *b = &right->channels[i];
+        if (strcmp(a->channel, b->channel) || a->kind != b->kind || a->available != b->available || a->controllable != b->controllable) return true;
+    }
+    return false;
+}
+
+static bool read_external_io(edge_acquisition *acquisition, uint64_t now, edge_external_io_snapshot *snapshot) {
+    const bool connected = edge_external_io_read(NULL, snapshot);
+    if (!connected) {
+        *snapshot = acquisition->io_capability;
+        for (size_t i = 0; i < snapshot->count; ++i) {
+            snapshot->channels[i].available = false;
+            snapshot->channels[i].controllable = false;
+        }
+        acquisition->io_reconnect_ms = now + 5000U;
+    }
+    acquisition->io_connected = connected;
+    if (!acquisition->io_capability_seen || io_capability_changed(&acquisition->io_capability, snapshot)) {
+        acquisition->io_capability = *snapshot;
+        acquisition->io_capability_seen = true;
+        if (acquisition->platform_count)
+            (void)worker_send(acquisition, EDGE_ACQUISITION_EVENT_IO_CAPABILITY,
+                              acquisition->platform_ids[0], snapshot, sizeof(*snapshot));
+    }
+    return connected;
+}
+
+static bool prepare_external_io(edge_acquisition_device *device, const edge_external_io_snapshot *snapshot, uint64_t now) {
+    iot_edge_v1_TelemetryValue values[15] = {0};
+    bool any_available = false;
+    for (size_t i = 0; i < device->external_io_count; ++i) {
+        const iot_edge_v1_ExternalIoPointConfig *point = device->external_io[i];
+        iot_edge_v1_TelemetryValue *value = &values[i];
+        copy_text(value->element_id, sizeof(value->element_id), point->point_id);
+        copy_text(value->name, sizeof(value->name), point->name);
+        copy_text(value->unit, sizeof(value->unit), point->unit);
+        value->hidden = point->hidden;
+        for (size_t j = 0; j < snapshot->count; ++j) {
+            const edge_external_io_channel *channel = &snapshot->channels[j];
+            if (strcmp(channel->channel, point->channel) || channel->kind != point->kind || !channel->available) continue;
+            value->has_value = true;
+            if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI) {
+                value->value.kind = iot_edge_v1_ValueKind_VALUE_SIGNED;
+                value->value.which_value = iot_edge_v1_ScalarValue_signed_value_tag;
+                value->value.value.signed_value = channel->value;
+            } else {
+                value->value.kind = iot_edge_v1_ValueKind_VALUE_BOOL;
+                value->value.which_value = iot_edge_v1_ScalarValue_bool_value_tag;
+                value->value.value.bool_value = channel->value != 0;
+            }
+            any_available = true;
+            break;
+        }
+    }
+    const uint64_t interval = device->config->io_interval_ms ? device->config->io_interval_ms : (uint64_t)device->config->report_interval_sec * 1000U;
+    device->external_io_next_ms = now + interval;
+    if (!any_available && device->external_io_unavailable) return true;
+    device->external_io_unavailable = !any_available;
+    iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
+    record.record_id.size = record.device_id.size = record.endpoint_id.size = record.model_id.size = 16U;
+    record_id((uint64_t)current_ms(), record.record_id.bytes);
+    memcpy(record.device_id.bytes, device->config->device_id.bytes, 16U);
+    memcpy(record.endpoint_id.bytes, device->config->endpoint_id.bytes, 16U);
+    memcpy(record.model_id.bytes, device->external_io[0]->model_id.bytes, 16U);
+    record.protocol = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+    record.configuration_sha256.size = 32U;
+    memcpy(record.configuration_sha256.bytes, device->configuration_digest, 32U);
+    record.observed_at_ms = current_ms();
+    record.values = values;
+    record.values_count = (pb_size_t)device->external_io_count;
+    copy_text(record.direction, sizeof(record.direction), "UP");
+    size_t size = 0;
+    if (!pb_get_encoded_size(&size, iot_edge_v1_TelemetryRecord_fields, &record) || size > 14000U) return false;
+    uint8_t *wire = malloc(size);
+    if (!wire) return false;
+    pb_ostream_t stream = pb_ostream_from_buffer(wire, size);
+    if (!pb_encode(&stream, iot_edge_v1_TelemetryRecord_fields, &record)) { free(wire); return false; }
+    device->external_io_pending = wire;
+    device->external_io_pending_size = stream.bytes_written;
+    memcpy(device->external_io_pending_id, record.record_id.bytes, 16U);
+    device->external_io_retry_ms = now;
+    return true;
+}
+
+static void external_io_tick(edge_acquisition *acquisition, uint64_t now) {
+    bool due = false;
+    for (size_t i = 0; i < acquisition->device_count; ++i) {
+        edge_acquisition_device *device = &acquisition->devices[i];
+        if (!acquisition->io_quiesce_requested && device->external_io_enabled && device->external_io_count && !device->external_io_pending && now >= device->external_io_next_ms) due = true;
+    }
+    if (due || (!acquisition->io_quiesce_requested && !acquisition->io_connected && now >= acquisition->io_reconnect_ms && access("/etc/init.d/dtu-io", X_OK) == 0)) {
+        edge_external_io_snapshot snapshot = {0};
+        (void)read_external_io(acquisition, now, &snapshot);
+        for (size_t i = 0; i < acquisition->device_count; ++i) {
+            edge_acquisition_device *device = &acquisition->devices[i];
+            if (!acquisition->io_quiesce_requested && device->external_io_enabled && device->external_io_count && !device->external_io_pending && now >= device->external_io_next_ms &&
+                !prepare_external_io(device, &snapshot, now)) {
+                edge_log_local_fault(device->platform_id, device->config->device_id.bytes, 0U, EDGE_LOCAL_FAULT_WORKER_ENCODE, 3U);
+            }
+        }
+    }
+    for (size_t i = 0; i < acquisition->device_count; ++i) {
+        edge_acquisition_device *device = &acquisition->devices[i];
+        if (device->external_io_result && now >= device->external_io_result_retry_ms) {
+            (void)worker_send(acquisition, EDGE_ACQUISITION_EVENT_EXTERNAL_IO_COMMAND, device->platform_id,
+                              device->external_io_result, sizeof(*device->external_io_result));
+            device->external_io_result_retry_ms = now + 1000U;
+        }
+        if (!device->external_io_enabled || !device->external_io_pending || now < device->external_io_retry_ms) continue;
+        (void)worker_send(acquisition, EDGE_ACQUISITION_EVENT_EXTERNAL_IO, device->platform_id,
+                          device->external_io_pending, (uint32_t)device->external_io_pending_size);
+        device->external_io_retry_ms = now + 1000U;
+    }
+    if (acquisition->io_quiesce_requested && !acquisition->io_quiesce_sent) {
+        bool pending = false;
+        for (size_t i = 0; i < acquisition->device_count; ++i)
+            pending = pending || acquisition->devices[i].external_io_pending || acquisition->devices[i].external_io_result;
+        if (!pending && acquisition->platform_count) {
+            edge_acquisition_message ready = {.magic = EDGE_ACQUISITION_MAGIC, .type = EDGE_ACQUISITION_EVENT_IO_QUIESCED,
+                                              .report_token = acquisition->io_quiesce_token, .payload_size = 1U};
+            memcpy(ready.platform_id, acquisition->platform_ids[0], 16U);
+            ready.payload.telemetry[0] = 1;
+            acquisition->io_quiesce_sent = send(acquisition->worker_fd, &ready, acquisition_message_size(1U), MSG_DONTWAIT | MSG_NOSIGNAL) == (ssize_t)acquisition_message_size(1U);
         }
     }
 }
@@ -4552,6 +4883,7 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
         const uint64_t schedule_ms = monotonic_milliseconds();
         dtu_supervise(acquisition, schedule_ms);
         serial_tick(acquisition, schedule_ms);
+        external_io_tick(acquisition, schedule_ms);
         if (schedule_ms < next_tick)
             continue;
         size_t write_budget = 4U;
@@ -4743,7 +5075,15 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             acquisition_message_size(message.payload_size) != (size_t)size)
             continue;
         acquisition->worker_last_event_ms = now_ms;
-        if (message.type == EDGE_ACQUISITION_EVENT_DTU &&
+        if (message.type == EDGE_ACQUISITION_EVENT_IO_QUIESCED && message.payload_size == 1U && message.report_token == acquisition->io_quiesce_token) {
+            acquisition->io_quiesced_ack = true;
+        } else if (message.type == EDGE_ACQUISITION_EVENT_IO_CAPABILITY &&
+            message.payload_size == sizeof(message.payload.io_capability)) {
+            acquisition->io_capability = message.payload.io_capability;
+            acquisition->io_capability_seen = true;
+            if (acquisition->io_callback)
+                acquisition->io_callback(acquisition->callback_context, &acquisition->io_capability);
+        } else if (message.type == EDGE_ACQUISITION_EVENT_DTU &&
             message.payload_size == sizeof(message.payload.dtu_status)) {
             if (acquisition->dtu_callback)
                 acquisition->dtu_callback(acquisition->callback_context, message.platform_id, &message.payload.dtu_status);
@@ -4758,7 +5098,8 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             if (pb_decode(&stream, iot_edge_v1_RawPacket_fields, &packet) && acquisition->debug)
                 acquisition->debug(acquisition->callback_context, message.platform_id, &packet);
             pb_release(iot_edge_v1_RawPacket_fields, &packet);
-        } else if (message.type == EDGE_ACQUISITION_EVENT_TELEMETRY ||
+        } else if (message.type == EDGE_ACQUISITION_EVENT_EXTERNAL_IO ||
+            message.type == EDGE_ACQUISITION_EVENT_TELEMETRY ||
             message.type == EDGE_ACQUISITION_EVENT_SL651) {
             iot_edge_v1_TelemetryRecord record = iot_edge_v1_TelemetryRecord_init_zero;
             pb_istream_t stream = pb_istream_from_buffer(message.payload.telemetry,
@@ -4766,6 +5107,14 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
             if (pb_decode(&stream, iot_edge_v1_TelemetryRecord_fields, &record)) {
                 const bool stored = acquisition->telemetry(acquisition->callback_context,
                                                            message.platform_id, &record);
+                if (stored && message.type == EDGE_ACQUISITION_EVENT_EXTERNAL_IO &&
+                    record.record_id.size == 16U && record.device_id.size == 16U) {
+                    memcpy(message.device_id, record.device_id.bytes, 16U);
+                    memcpy(message.payload.telemetry, record.record_id.bytes, 16U);
+                    message.type = EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_COMMIT;
+                    message.payload_size = 16U;
+                    (void)send(acquisition->worker_fd, &message, acquisition_message_size(16U), MSG_DONTWAIT | MSG_NOSIGNAL);
+                }
                 if (stored && message.type == EDGE_ACQUISITION_EVENT_SL651) {
                     message.type = EDGE_ACQUISITION_CONTROL_SL651_COMMIT;
                     message.payload_size = 0;
@@ -4778,7 +5127,7 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
                                      EDGE_LOCAL_FAULT_PARENT_DECODE, 1U);
             }
             pb_release(iot_edge_v1_TelemetryRecord_fields, &record);
-        } else if (message.type == EDGE_ACQUISITION_EVENT_COMMAND_RESULT &&
+        } else if ((message.type == EDGE_ACQUISITION_EVENT_COMMAND_RESULT || message.type == EDGE_ACQUISITION_EVENT_EXTERNAL_IO_COMMAND) &&
                    message.payload_size == sizeof(message.payload.command_result)) {
             const iot_edge_v1_CommandResult *result = &message.payload.command_result;
             const bool stored =
@@ -4787,7 +5136,16 @@ static void drain_worker(edge_acquisition *acquisition, uint64_t now_ms) {
                 result->device_id.size == 16
                     ? find_device(acquisition, message.platform_id, result->device_id.bytes)
                     : NULL;
-            if (stored && device && device->sl651 && result->command_id.size == 16) {
+            if (stored && message.type == EDGE_ACQUISITION_EVENT_EXTERNAL_IO_COMMAND && device && result->command_id.size == 16U) {
+                uint8_t id[16];
+                memcpy(id, result->command_id.bytes, 16U);
+                memcpy(message.device_id, result->device_id.bytes, 16U);
+                memcpy(message.payload.telemetry, id, 16U);
+                message.type = EDGE_ACQUISITION_CONTROL_EXTERNAL_IO_COMMAND_COMMIT;
+                message.payload_size = 16U;
+                (void)send(acquisition->worker_fd, &message, acquisition_message_size(16U), MSG_DONTWAIT | MSG_NOSIGNAL);
+            }
+            if (stored && message.type == EDGE_ACQUISITION_EVENT_COMMAND_RESULT && device && device->sl651 && result->command_id.size == 16) {
                 uint8_t id[16];
                 memcpy(id, result->command_id.bytes, 16);
                 memcpy(message.device_id, result->device_id.bytes, 16);
@@ -4836,6 +5194,27 @@ void edge_acquisition_tick(edge_acquisition *acquisition, uint64_t now_ms) {
     }
 }
 
+bool edge_acquisition_prepare_io_swap(edge_acquisition *acquisition) {
+    if (!acquisition || acquisition->worker_pid <= 0 || acquisition->worker_fd < 0) return acquisition != NULL;
+    ++acquisition->io_quiesce_token;
+    if (!acquisition->io_quiesce_token) ++acquisition->io_quiesce_token;
+    acquisition->io_quiesced_ack = false;
+    edge_acquisition_message message = {.magic = EDGE_ACQUISITION_MAGIC, .type = EDGE_ACQUISITION_CONTROL_IO_QUIESCE,
+                                        .report_token = acquisition->io_quiesce_token, .payload_size = 0U};
+    if (send(acquisition->worker_fd, &message, acquisition_message_size(0U), MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)acquisition_message_size(0U)) return false;
+    const uint64_t deadline = monotonic_milliseconds() + 250U;
+    while (monotonic_milliseconds() < deadline) {
+        struct pollfd event = {.fd = acquisition->worker_fd, .events = POLLIN};
+        (void)poll(&event, 1U, 10);
+        drain_worker(acquisition, monotonic_milliseconds());
+        if (acquisition->io_quiesced_ack) return true;
+        if (acquisition->worker_fd < 0) return false;
+    }
+    message.type = EDGE_ACQUISITION_CONTROL_IO_RESUME;
+    (void)send(acquisition->worker_fd, &message, acquisition_message_size(0U), MSG_DONTWAIT | MSG_NOSIGNAL);
+    return false;
+}
+
 void edge_acquisition_status(edge_acquisition *acquisition,
                              iot_edge_v1_DeviceStatusReport *report) {
     const uint8_t platform_id[16] = {0};
@@ -4882,7 +5261,12 @@ bool edge_acquisition_command_for_platform_until(
     }
     edge_acquisition_device *device = request->device_id.size == 16
         ? find_device(acquisition, platform_id, request->device_id.bytes) : NULL;
-    if (!device || !device->sl651) {
+    if (request->external_io) {
+        if (!external_io_command_point(device, request)) {
+            set_error(error, error_size, "external IO point is unavailable or not writable");
+            return false;
+        }
+    } else if (!device || !device->sl651) {
         edge_write_command command;
         if (!build_write_command(acquisition, platform_id, request,
                                  start_before_monotonic_ms,

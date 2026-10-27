@@ -218,6 +218,45 @@ static bool valid_point(const edge_runtime_config *config,
     return device != NULL && device->protocol == expected;
 }
 
+static bool valid_external_io(const edge_runtime_config *config, uint32_t index) {
+    const iot_edge_v1_ConfigItem *item = &config->items[index];
+    const iot_edge_v1_ExternalIoPointConfig *point = &item->item.external_io;
+    if (item->kind != iot_edge_v1_ConfigItemKind_CONFIG_ITEM_EXTERNAL_IO ||
+        point->device_id.size != 16U || point->model_id.size != 16U ||
+        !edge_runtime_config_device(config, point->device_id.bytes) ||
+        !point->name[0] || strlen(point->point_id) != 36U)
+        return false;
+    for (size_t i = 0; i < 36U; ++i) {
+        const char ch = point->point_id[i];
+        if (i == 8U || i == 13U || i == 18U || i == 23U) {
+            if (ch != '-') return false;
+        } else if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+    }
+    if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DI) {
+        if (strlen(point->channel) != 3U || strncmp(point->channel, "di", 2U) ||
+            point->channel[2] < '0' || point->channel[2] > '3' || point->unit[0]) return false;
+    } else if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO) {
+        if (strlen(point->channel) != 3U || strncmp(point->channel, "do", 2U) ||
+            point->channel[2] < '0' || point->channel[2] > '6' || point->unit[0]) return false;
+    } else if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI) {
+        if (strlen(point->channel) != 3U || strncmp(point->channel, "AI", 2U) ||
+            point->channel[2] < '0' || point->channel[2] > '3' || strcmp(point->unit, "uA")) return false;
+    } else {
+        return false;
+    }
+    for (uint32_t other_index = 0U; other_index < index; ++other_index) {
+        const iot_edge_v1_ConfigItem *other = &config->items[other_index];
+        if (other->which_item != iot_edge_v1_ConfigItem_external_io_tag) continue;
+        const iot_edge_v1_ExternalIoPointConfig *previous = &other->item.external_io;
+        if (same_id(&previous->device_id, point->device_id.bytes) &&
+            (!strcmp(previous->point_id, point->point_id) || !strcmp(previous->channel, point->channel))) return false;
+        if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO && !strcmp(previous->channel, point->channel)) return false;
+    }
+    return true;
+}
+
 bool edge_runtime_config_load(edge_runtime_config *output,
                               const edge_memory_config_set *snapshot,
                               char *error, size_t error_size) {
@@ -228,6 +267,7 @@ bool edge_runtime_config_load(edge_runtime_config *output,
     }
     edge_runtime_config candidate = {0};
     candidate.revision = snapshot->revision;
+    memcpy(candidate.digest, snapshot->digest, sizeof(candidate.digest));
     candidate.item_count = snapshot->item_count;
     if (candidate.item_count != 0U) {
         candidate.items = calloc(candidate.item_count, sizeof(*candidate.items));
@@ -265,6 +305,8 @@ bool edge_runtime_config_load(edge_runtime_config *output,
             valid = item->kind == iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT && edge_derived_validate(&item->item.derived_point) && edge_runtime_config_device(&candidate, item->item.derived_point.device_id.bytes);
         else if (item->which_item == iot_edge_v1_ConfigItem_dtu_tag)
             valid = item->kind == iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DTU && valid_dtu(&item->item.dtu);
+        else if (item->which_item == iot_edge_v1_ConfigItem_external_io_tag)
+            valid = valid_external_io(&candidate, index);
         else
             valid = valid_point(&candidate, item);
         if (!valid) {

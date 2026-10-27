@@ -6,11 +6,15 @@
 
 #include "edge.pb.h"
 #include "edge_runtime_config.h"
+#include "edge_external_io.h"
 
 typedef struct edge_acquisition edge_acquisition;
 typedef void (*edge_acquisition_dtu_callback)(void *context, const uint8_t platform_id[16],
     const iot_edge_v1_DtuStatus *status);
 void edge_acquisition_set_dtu_callback(edge_acquisition *acquisition, edge_acquisition_dtu_callback callback);
+typedef void (*edge_acquisition_io_callback)(void *context, const edge_external_io_snapshot *snapshot);
+void edge_acquisition_set_io_callback(edge_acquisition *acquisition, edge_acquisition_io_callback callback);
+const edge_external_io_snapshot *edge_acquisition_io_capability(const edge_acquisition *acquisition);
 
 typedef bool (*edge_acquisition_telemetry_callback)(
     void *context, const uint8_t platform_id[16],
@@ -35,6 +39,7 @@ typedef struct {
     uint16_t priority;
     bool bootstrap;
     bool raw_telemetry;
+    bool external_io;
     const edge_runtime_config *config;
 } edge_acquisition_source;
 
@@ -62,10 +67,14 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
 /* Starts the supervised acquisition worker without blocking the WebSocket loop. */
 bool edge_acquisition_start(edge_acquisition *acquisition,
                             char *error, size_t error_size);
+/* Pause new IO work and wait until pending IO records and results are queued. */
+bool edge_acquisition_prepare_io_swap(edge_acquisition *acquisition);
 void edge_acquisition_stop(edge_acquisition *acquisition);
 int edge_acquisition_event_fd(const edge_acquisition *acquisition);
 bool edge_acquisition_set_raw_telemetry(edge_acquisition *acquisition,
                                        const uint8_t platform_id[16], bool enabled);
+bool edge_acquisition_set_external_io(edge_acquisition *acquisition,
+                                      const uint8_t platform_id[16], bool enabled);
 
 /* Drains worker events and restarts a failed worker; it performs no device I/O. */
 void edge_acquisition_tick(edge_acquisition *acquisition, uint64_t now_ms);

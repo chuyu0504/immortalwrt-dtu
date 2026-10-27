@@ -24,6 +24,25 @@
 #define EDGE_TMPFS_MIN_FREE_PERCENT 15U
 
 static bool path_join(char *output, size_t capacity, const char *left, const char *right);
+static uint8_t *read_file(const char *path, size_t maximum, size_t *size);
+
+static bool protected_outbox_message(const char *path) {
+    size_t size = 0;
+    uint8_t *bytes = read_file(path, EDGENODE_MAX_WS_MESSAGE, &size);
+    iot_edge_v1_Envelope *envelope = calloc(1, sizeof(*envelope));
+    const char *error = NULL;
+    bool protected = true;
+    if (bytes && envelope && edge_protocol_decode(bytes, size, envelope, &error)) {
+        protected = envelope->which_payload == iot_edge_v1_Envelope_command_result_tag ||
+            (envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag &&
+             envelope->payload.telemetry_batch.records_count == 1U &&
+             envelope->payload.telemetry_batch.records[0].protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO);
+    }
+    if (envelope) edge_protocol_release(envelope);
+    free(envelope);
+    free(bytes);
+    return protected;
+}
 
 static bool find_oldest_outbox(char *output, size_t capacity) {
     DIR *root = opendir(EDGE_SPOOL_ROOT);
@@ -51,7 +70,7 @@ static bool find_oldest_outbox(char *output, size_t capacity) {
             char candidate[256];
             struct stat info;
             if (!path_join(candidate, sizeof(candidate), outbox_path, entry->d_name) ||
-                lstat(candidate, &info) != 0 || !S_ISREG(info.st_mode))
+                lstat(candidate, &info) != 0 || !S_ISREG(info.st_mode) || protected_outbox_message(candidate))
                 continue;
             if (!found || info.st_mtime < oldest) {
                 const size_t length = strlen(candidate);
@@ -320,6 +339,7 @@ static bool load_outbox(edge_spool *spool) {
         iot_edge_v1_Envelope envelope = iot_edge_v1_Envelope_init_zero;
         const char *error = NULL;
         bool entry_ok = true;
+        bool preserve = false;
         if (data == NULL || !edge_protocol_decode(data, size, &envelope, &error) ||
             envelope.platform_id.size != 16U ||
             memcmp(envelope.platform_id.bytes, spool->platform_id, 16U) != 0)
@@ -339,14 +359,24 @@ static bool load_outbox(edge_spool *spool) {
                 ack_id = envelope.payload.command_result.command_id.bytes;
                 ack_id_size = envelope.payload.command_result.command_id.size;
             }
-            const bool priority = envelope.which_payload ==
-                                  iot_edge_v1_Envelope_command_result_tag;
-            if (ack_id_size != 16U || memcmp(ack_id, message_id, 16U) != 0 ||
-                !edge_memory_outbox_put_priority(&spool->outbox, message_id, data,
-                                                 size, priority))
+            const bool priority = envelope.which_payload == iot_edge_v1_Envelope_command_result_tag ||
+                (envelope.which_payload == iot_edge_v1_Envelope_telemetry_batch_tag &&
+                 envelope.payload.telemetry_batch.records_count == 1U &&
+                 envelope.payload.telemetry_batch.records[0].protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO);
+            if (ack_id_size != 16U || memcmp(ack_id, message_id, 16U) != 0) {
                 entry_ok = false;
+            } else if (!edge_memory_outbox_put_priority(&spool->outbox, message_id, data, size, priority)) {
+                entry_ok = false;
+                preserve = priority;
+            }
         }
         edge_protocol_release(&envelope);
+        if (preserve) {
+            free(data);
+            closedir(input);
+            syslog(LOG_ERR, "cannot restore protected outbox message: %s", path);
+            return false;
+        }
         if (!entry_ok) {
             unlink(path);
             syslog(LOG_WARNING, "removed invalid or over-limit tmpfs outbox message: %s", path);
@@ -492,7 +522,12 @@ bool edge_spool_init(edge_spool *spool, const uint8_t platform_id[16],
         remove_tree(active);
     }
     restore_checkpoint(spool);
-    return load_outbox(spool);
+    /* Restore a backlog created before a configured limit was reduced. New
+     * writes keep the configured bound until that backlog has drained. */
+    spool->outbox.maximum_bytes = 8U * 1024U * 1024U;
+    const bool restored = load_outbox(spool);
+    spool->outbox.maximum_bytes = outbox_maximum_bytes;
+    return restored;
 }
 
 void edge_spool_free(edge_spool *spool) {
@@ -619,20 +654,64 @@ bool edge_spool_outbox_put(edge_spool *spool, const uint8_t message_id[16],
                                           envelope_size, false);
 }
 
+/* IPC retries create a fresh outer Envelope, but its protected business
+ * payload must remain identical for the same record or command ID. */
+static bool same_protected_payload(const edge_memory_message *existing,
+                                   const uint8_t *wire, size_t wire_size) {
+    iot_edge_v1_Envelope *old = calloc(1, sizeof(*old));
+    iot_edge_v1_Envelope *incoming = calloc(1, sizeof(*incoming));
+    uint8_t *old_bytes = malloc(EDGENODE_MAX_WS_MESSAGE);
+    uint8_t *new_bytes = malloc(EDGENODE_MAX_WS_MESSAGE);
+    const char *error = NULL;
+    bool same = false;
+    if (!old || !incoming || !old_bytes || !new_bytes ||
+        !edge_protocol_decode(existing->payload, existing->payload_size, old, &error) ||
+        !edge_protocol_decode(wire, wire_size, incoming, &error) ||
+        old->which_payload != incoming->which_payload)
+        goto done;
+    const pb_msgdesc_t *fields = NULL;
+    const void *old_payload = NULL, *new_payload = NULL;
+    if (old->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag &&
+        old->payload.telemetry_batch.records_count == 1U &&
+        incoming->payload.telemetry_batch.records_count == 1U) {
+        fields = iot_edge_v1_TelemetryRecord_fields;
+        old_payload = &old->payload.telemetry_batch.records[0];
+        new_payload = &incoming->payload.telemetry_batch.records[0];
+    } else if (old->which_payload == iot_edge_v1_Envelope_command_result_tag) {
+        fields = iot_edge_v1_CommandResult_fields;
+        old_payload = &old->payload.command_result;
+        new_payload = &incoming->payload.command_result;
+    }
+    if (fields) {
+        pb_ostream_t first = pb_ostream_from_buffer(old_bytes, EDGENODE_MAX_WS_MESSAGE);
+        pb_ostream_t second = pb_ostream_from_buffer(new_bytes, EDGENODE_MAX_WS_MESSAGE);
+        same = pb_encode(&first, fields, old_payload) && pb_encode(&second, fields, new_payload) &&
+            first.bytes_written == second.bytes_written &&
+            !memcmp(old_bytes, new_bytes, first.bytes_written);
+    }
+done:
+    if (old) edge_protocol_release(old);
+    if (incoming) edge_protocol_release(incoming);
+    free(old); free(incoming); free(old_bytes); free(new_bytes);
+    return same;
+}
+
 bool edge_spool_outbox_put_priority(edge_spool *spool,
                                     const uint8_t message_id[16],
                                     const uint8_t *envelope, size_t envelope_size,
                                     bool priority) {
     if (spool == NULL || message_id == NULL || envelope == NULL ||
-        envelope_size == 0U || envelope_size > EDGENODE_MAX_WS_MESSAGE ||
-        envelope_size > spool->outbox.maximum_bytes)
+        envelope_size == 0U || envelope_size > EDGENODE_MAX_WS_MESSAGE)
+        return false;
+    for (const edge_memory_message *existing = spool->outbox.head; existing; existing = existing->next)
+        if (!memcmp(existing->message_id, message_id, 16U))
+            return !existing->priority || same_protected_payload(existing, envelope, envelope_size);
+    if (envelope_size > spool->outbox.maximum_bytes)
         return false;
     (void)edge_spool_outbox_first(spool);
     while (spool->outbox.bytes > spool->outbox.maximum_bytes - envelope_size) {
         const edge_memory_message *oldest =
             edge_memory_outbox_oldest_regular(&spool->outbox);
-        if (oldest == NULL && priority)
-            oldest = edge_spool_outbox_first(spool);
         if (oldest == NULL)
             return false;
         uint8_t oldest_id[16];

@@ -40,6 +40,25 @@ endif()
 
 enable_testing()
 
+option(EDGENODE_EXTERNAL_IO_TESTS "验证外部 IO 的 ubus 读取和写入" OFF)
+if(EDGENODE_EXTERNAL_IO_TESTS)
+    find_path(UBUS_INCLUDE_DIR libubus.h REQUIRED)
+    find_library(UBUS_LIBRARY ubus REQUIRED)
+    find_library(UBOX_LIBRARY ubox REQUIRED)
+    find_program(UBUSD_EXECUTABLE ubusd REQUIRED)
+    add_executable(edge_external_io_test edge_external_io_test.c "${EDGENODE_ROOT}/src/edge_external_io.c")
+    target_include_directories(edge_external_io_test PRIVATE "${EDGENODE_ROOT}/src" "${UBUS_INCLUDE_DIR}")
+    target_link_libraries(edge_external_io_test PRIVATE edgenode_nanopb "${UBUS_LIBRARY}" "${UBOX_LIBRARY}")
+    add_test(NAME edge_external_io COMMAND edge_external_io_test "${UBUSD_EXECUTABLE}")
+    set_tests_properties(edge_external_io PROPERTIES TIMEOUT 15)
+    if(UNIX AND NOT APPLE)
+        get_filename_component(UBUS_LIBRARY_DIR "${UBUS_LIBRARY}" DIRECTORY)
+        get_filename_component(UBOX_LIBRARY_DIR "${UBOX_LIBRARY}" DIRECTORY)
+        set_tests_properties(edge_external_io PROPERTIES
+            ENVIRONMENT "LD_LIBRARY_PATH=${UBUS_LIBRARY_DIR}:${UBOX_LIBRARY_DIR}:$ENV{LD_LIBRARY_PATH}")
+    endif()
+endif()
+
 option(EDGENODE_WS_TRANSPORT_TESTS "验证 libwebsockets 原生传输及压缩线帧" OFF)
 if(EDGENODE_WS_TRANSPORT_TESTS)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -191,6 +210,14 @@ if(UNIX)
         target_include_directories(edge_dtu_checkpoint_fixture PRIVATE "${EDGENODE_ROOT}/src" "${MBEDTLS_INCLUDE_DIR}")
         target_link_libraries(edge_dtu_checkpoint_fixture PRIVATE edgenode_nanopb "${MBEDCRYPTO_LIBRARY}")
         target_compile_definitions(edge_dtu_checkpoint_fixture PRIVATE EDGE_SPOOL_ROOT="spool" EDGE_DTU_CONFIG_ROOT="checkpoints")
+        add_executable(edge_spool_io_test edge_spool_io_test.c
+            "${EDGENODE_ROOT}/src/edge_spool.c" "${EDGENODE_ROOT}/src/edge_memory.c"
+            "${EDGENODE_ROOT}/src/edge_outbox.c" "${EDGENODE_ROOT}/src/edge_protocol.c"
+            "${EDGENODE_ROOT}/src/log.c")
+        target_include_directories(edge_spool_io_test PRIVATE "${EDGENODE_ROOT}/src" "${MBEDTLS_INCLUDE_DIR}")
+        target_link_libraries(edge_spool_io_test PRIVATE edgenode_nanopb "${MBEDCRYPTO_LIBRARY}")
+        target_compile_definitions(edge_spool_io_test PRIVATE EDGE_SPOOL_ROOT="spool-io" EDGE_DTU_CONFIG_ROOT="checkpoints-io")
+        add_test(NAME edge_spool_io COMMAND edge_spool_io_test)
     endif()
     add_executable(edge_dtu_fixture edge_dtu_fixture.c "${EDGENODE_ROOT}/src/edge_dtu.c")
     target_include_directories(edge_dtu_fixture PRIVATE "${EDGENODE_ROOT}/src")
@@ -238,6 +265,7 @@ if(UNIX)
     add_test(NAME edge_log COMMAND edge_log_test)
 
     add_executable(edge_acquisition_test
+        edge_external_io_stub.c
         "${EDGENODE_ROOT}/src/edge_sl651.c"
         edge_acquisition_test.c
         "${EDGENODE_ROOT}/src/edge_acquisition.c"
@@ -257,6 +285,8 @@ if(UNIX)
     target_include_directories(edge_acquisition_test PRIVATE "${EDGENODE_ROOT}/src")
     target_link_libraries(edge_acquisition_test PRIVATE edgenode_nanopb m)
     add_test(NAME edge_acquisition COMMAND edge_acquisition_test)
+    add_test(NAME edge_acquisition_external_io COMMAND edge_acquisition_test)
+    set_tests_properties(edge_acquisition_external_io PROPERTIES ENVIRONMENT "EDGE_TEST_EXTERNAL_IO_ONLY=1" TIMEOUT 20)
 endif()
 
 add_executable(edge_sl651_test edge_sl651_test.c "${EDGENODE_ROOT}/src/edge_sl651.c")

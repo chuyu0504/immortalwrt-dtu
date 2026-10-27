@@ -9,6 +9,7 @@
 
 typedef struct {
     uint64_t revision;
+    uint8_t digest[32];
     iot_edge_v1_ConfigItem *items;
     uint32_t item_count;
     uint32_t endpoint_count;

@@ -76,9 +76,17 @@ static void test_hello_round_trip(void) {
             "firmware WS capability changed during round trip");
     require(decoded.payload.hello.supports_command_start_before,
             "command start deadline capability changed during round trip");
+    require(!decoded.payload.hello.supports_external_io,
+            "legacy hello must not imply external IO support");
     require(decoded.message_id.size == 16U && (decoded.message_id.bytes[6] >> 4U) == 7U,
             "message id is not UUIDv7");
     require((decoded.message_id.bytes[8] & 0xc0U) == 0x80U, "bad UUID variant");
+
+    envelope.payload.hello.supports_external_io = true;
+    require(edge_protocol_encode(&envelope, encoded, sizeof(encoded), &encoded_size, &error) &&
+                edge_protocol_decode(encoded, encoded_size, &decoded, &error) &&
+                decoded.payload.hello.supports_external_io,
+            error != NULL ? error : "external IO capability changed during round trip");
 }
 
 static void test_heartbeat_mobile_state_round_trip(void) {

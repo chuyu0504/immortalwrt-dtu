@@ -2205,7 +2205,117 @@ static void verify_command_expiry_while_serial_is_paused(void) {
     close(master);
 }
 
+static unsigned external_io_reports;
+static uint8_t first_external_io_id[16];
+static bool allow_external_io_commit;
+static bool external_io_telemetry(void *context, const uint8_t platform_id[16], const iot_edge_v1_TelemetryRecord *record) {
+    (void)context; (void)platform_id;
+    if (record->protocol != iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO) return true;
+    assert(record->configuration_sha256.size == 32U && record->configuration_sha256.bytes[0] == 0xa5U);
+    assert(record->values_count == 1U && record->values[0].has_value &&
+           record->values[0].value.which_value == iot_edge_v1_ScalarValue_bool_value_tag &&
+           record->values[0].value.value.bool_value);
+    if (!external_io_reports) memcpy(first_external_io_id, record->record_id.bytes, 16U);
+    else if (external_io_reports == 1U) assert(!memcmp(first_external_io_id, record->record_id.bytes, 16U));
+    ++external_io_reports;
+    return allow_external_io_commit;
+}
+
+static void verify_external_io_independent_of_protocol(void) {
+    iot_edge_v1_ConfigItem values[4];
+    edge_runtime_config config = make_config(values);
+    memset(config.digest, 0xa5, sizeof(config.digest));
+    config.item_count = 4;
+    values[3] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+    values[3].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_EXTERNAL_IO;
+    values[3].which_item = iot_edge_v1_ConfigItem_external_io_tag;
+    iot_edge_v1_ExternalIoPointConfig *point = &values[3].item.external_io;
+    const uint8_t device_id[16] = {2U}, model_id[16] = {4U}, platform_id[16] = {6U};
+    set_id(&point->device_id, device_id); set_id(&point->model_id, model_id);
+    strcpy(point->point_id, "00000000-0000-4000-8000-000000000001");
+    strcpy(point->name, "input"); strcpy(point->channel, "di0");
+    point->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DI;
+    edge_acquisition_source source = {.platform_id = platform_id, .config = &config, .raw_telemetry = true, .external_io = true};
+    edge_acquisition *acquisition = edge_acquisition_create(external_io_telemetry, command, NULL);
+    assert(acquisition);
+    char error[256] = {0};
+    assert(edge_acquisition_apply_multi(acquisition, &source, 1U, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    const uint64_t deadline = monotonic_ms() + 5000U;
+    while (external_io_reports < 1U && monotonic_ms() < deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(external_io_reports == 1U);
+    assert(!edge_acquisition_prepare_io_swap(acquisition));
+    allow_external_io_commit = true;
+    while (external_io_reports < 2U && monotonic_ms() < deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(external_io_reports >= 2U);
+    assert(edge_acquisition_prepare_io_swap(acquisition));
+    edge_acquisition_destroy(acquisition);
+}
+
+static unsigned external_io_command_results;
+static bool external_io_command_callback(void *context, const uint8_t platform_id[16], const iot_edge_v1_CommandResult *result) {
+    (void)context; (void)platform_id;
+    assert(result->state == iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED && !result->write_ack_missing);
+    assert(result->actual_values_count == 1U && result->actual_values[0].value.value.bool_value);
+    ++external_io_command_results;
+    return external_io_command_results > 1U;
+}
+
+static void verify_external_io_command_readback(void) {
+    iot_edge_v1_ConfigItem values[4];
+    edge_runtime_config config = make_config(values);
+    config.item_count = 4;
+    values[3] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+    values[3].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_EXTERNAL_IO;
+    values[3].which_item = iot_edge_v1_ConfigItem_external_io_tag;
+    iot_edge_v1_ExternalIoPointConfig *point = &values[3].item.external_io;
+    const uint8_t device_id[16] = {2U}, model_id[16] = {4U}, platform_id[16] = {6U}, command_id[16] = {8U};
+    set_id(&point->device_id, device_id); set_id(&point->model_id, model_id);
+    strcpy(point->point_id, "00000000-0000-4000-8000-000000000002");
+    strcpy(point->name, "output"); strcpy(point->channel, "do0");
+    point->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO;
+    edge_acquisition_source source = {.platform_id = platform_id, .config = &config, .raw_telemetry = true, .external_io = true};
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry, external_io_command_callback, NULL);
+    assert(acquisition);
+    char error[256] = {0};
+    const uint8_t other_platform[16] = {7U};
+    edge_acquisition_source conflict[2] = {source, source};
+    conflict[1].platform_id = other_platform;
+    assert(!edge_acquisition_apply_multi(acquisition, conflict, 2U, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_apply_multi(acquisition, &source, 1U, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    iot_edge_v1_CommandRequest request = iot_edge_v1_CommandRequest_init_zero;
+    set_id(&request.command_id, command_id); set_id(&request.device_id, device_id);
+    request.external_io = true; request.has_start_before_ms = true; request.values_count = 1;
+    strcpy(request.values[0].element_id, point->point_id);
+    request.values[0].has_expected = true;
+    request.values[0].expected.which_value = iot_edge_v1_ScalarValue_string_value_tag;
+    strcpy(request.values[0].expected.value.string_value, "1");
+    const uint64_t deadline = monotonic_ms() + 10000U;
+    assert(edge_acquisition_command_for_platform_until(acquisition, platform_id, &request, deadline, deadline, error, sizeof(error)));
+    while (external_io_command_results < 2U && monotonic_ms() < deadline) {
+        struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+        (void)poll(&event, 1U, 20);
+        edge_acquisition_tick(acquisition, monotonic_ms());
+    }
+    assert(external_io_command_results == 2U);
+    edge_acquisition_destroy(acquisition);
+}
+
 int main(void) {
+    if (getenv("EDGE_TEST_EXTERNAL_IO_ONLY")) {
+        verify_external_io_independent_of_protocol();
+        verify_external_io_command_readback();
+        return 0;
+    }
     const char *local_log = "/tmp/edgenode-test-acquisition/logs/acquisition.log";
     (void)unlink(local_log);
     for (unsigned index = 1U; index < 4U; ++index) {
@@ -2244,6 +2354,8 @@ int main(void) {
     wait_for_status(acquisition);
     edge_acquisition_destroy(acquisition);
     verify_shared_resources();
+    verify_external_io_independent_of_protocol();
+    verify_external_io_command_readback();
     verify_stale_deadline_over_ipc();
     verify_acknowledged_write_with_offline_readback();
     verify_pty_partial_write_is_not_replayed();

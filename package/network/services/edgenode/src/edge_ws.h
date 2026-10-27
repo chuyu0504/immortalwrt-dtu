@@ -78,6 +78,7 @@ typedef struct {
     bool websocket_open;
     bool enrolled;
     bool raw_telemetry;
+    bool external_io;
     bool terminal_open;
     bool terminal_output_pending;
     bool terminal_output_sent;

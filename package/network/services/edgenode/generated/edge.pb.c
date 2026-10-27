@@ -33,6 +33,9 @@ PB_BIND(iot_edge_v1_VpnCapabilities, iot_edge_v1_VpnCapabilities, AUTO)
 PB_BIND(iot_edge_v1_CapabilityReport, iot_edge_v1_CapabilityReport, 4)
 
 
+PB_BIND(iot_edge_v1_ExternalIoChannel, iot_edge_v1_ExternalIoChannel, AUTO)
+
+
 PB_BIND(iot_edge_v1_TcpTraffic, iot_edge_v1_TcpTraffic, AUTO)
 
 
@@ -100,6 +103,9 @@ PB_BIND(iot_edge_v1_DerivedUnitRule, iot_edge_v1_DerivedUnitRule, 2)
 
 
 PB_BIND(iot_edge_v1_DerivedPointConfig, iot_edge_v1_DerivedPointConfig, 2)
+
+
+PB_BIND(iot_edge_v1_ExternalIoPointConfig, iot_edge_v1_ExternalIoPointConfig, AUTO)
 
 
 PB_BIND(iot_edge_v1_ConfigItem, iot_edge_v1_ConfigItem, 2)
@@ -241,6 +247,8 @@ PB_BIND(iot_edge_v1_Error, iot_edge_v1_Error, 2)
 
 
 PB_BIND(iot_edge_v1_Envelope, iot_edge_v1_Envelope, 4)
+
+
 
 
 

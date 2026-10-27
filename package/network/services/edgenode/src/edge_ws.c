@@ -41,6 +41,7 @@
 #define EDGE_TERMINAL_ACK_TIMEOUT_MS 15000U
 
 static void send_pending_modem_result(edge_ws_session *session);
+static bool send_capability_report(edge_ws_session *session, bool force);
 
 static void invalidate_command_clock(edge_ws_session *session) {
     const bool was_valid = session->command_clock.valid;
@@ -344,6 +345,16 @@ static void acquisition_dtu(void *context, const uint8_t platform_id[16],
     send_dtu_status(session);
 }
 
+static void acquisition_io_capability(void *context, const edge_external_io_snapshot *snapshot) {
+    (void)snapshot;
+    edge_ws_app *app = context;
+    for (size_t i = 0; i < app->config->platform_count; ++i) {
+        edge_ws_session *session = &app->sessions[i];
+        if (session->websocket_open && session->enrolled)
+            (void)send_capability_report(session, false);
+    }
+}
+
 static void acquisition_serial(void *context, const uint8_t platform_id[16],
                                const iot_edge_v1_SerialDebugEvent *event) {
     edge_ws_app *app = context;
@@ -535,6 +546,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_command_start_before = true;
     hello->supports_device_config = true;
     hello->supports_raw_telemetry = true;
+    hello->supports_external_io = access("/etc/init.d/dtu-io", X_OK) == 0;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
     safe_copy(hello->log_level, sizeof(hello->log_level), edge_log_level());
@@ -580,6 +592,18 @@ static bool send_capability_report(edge_ws_session *session, bool force) {
     report->ttyd_available = edge_capability_has_terminal();
     report->supports_dtu = true;
     report->supports_derived_points = true;
+    const edge_external_io_snapshot *io = edge_acquisition_io_capability(session->app->acquisition);
+    if (session->external_io && io && io->supported) {
+        report->supports_external_io = true;
+        report->external_io_channels_count = (pb_size_t)io->count;
+        for (size_t i = 0; i < io->count; ++i) {
+            iot_edge_v1_ExternalIoChannel *channel = &report->external_io_channels[i];
+            safe_copy(channel->channel, sizeof(channel->channel), io->channels[i].channel);
+            channel->kind = io->channels[i].kind;
+            channel->available = io->channels[i].available;
+            channel->controllable = io->channels[i].controllable;
+        }
+    }
     report->supports_serial_debug = session->app->config->serial_port[0] != '\0';
     report->supported_protocols_count = 6;
     report->supported_protocols[0] = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
@@ -834,6 +858,7 @@ static size_t build_acquisition_sources(
         sources[index].priority = session->config->priority;
         sources[index].bootstrap = session->config->bootstrap;
         sources[index].raw_telemetry = session->raw_telemetry;
+        sources[index].external_io = session->external_io;
         sources[index].config = session == replacement_session
                                     ? replacement_config
                                     : &session->runtime_config;
@@ -864,14 +889,16 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
         iot_edge_v1_ConfigItem *item = &envelope->payload.config_item;
         uint8_t encoded[EDGENODE_MAX_WS_MESSAGE];
         size_t encoded_size = 0U;
-        if (!verify_config_item(item, encoded, sizeof(encoded), &encoded_size) ||
+        if ((item->which_item == iot_edge_v1_ConfigItem_external_io_tag && !session->external_io) ||
+            !verify_config_item(item, encoded, sizeof(encoded), &encoded_size) ||
             !edge_spool_config_put(&session->spool, item->revision, item->index,
                                    item->sha256.bytes, encoded, encoded_size))
             send_config_result(session, item->revision, item->sha256.bytes, false,
                                "config_item_invalid", "configuration item was rejected");
         return;
     }
-    iot_edge_v1_ConfigCommit *commit = &envelope->payload.config_commit;
+    const iot_edge_v1_ConfigCommit committed = envelope->payload.config_commit;
+    const iot_edge_v1_ConfigCommit *commit = &committed;
     edge_runtime_config candidate = {0};
     edge_acquisition *candidate_acquisition = NULL;
     char apply_error[256] = "configuration digest or item count failed";
@@ -891,6 +918,7 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
                                                      session->app);
     edge_acquisition_set_debug_callback(candidate_acquisition, acquisition_debug);
     edge_acquisition_set_dtu_callback(candidate_acquisition, acquisition_dtu);
+    edge_acquisition_set_io_callback(candidate_acquisition, acquisition_io_capability);
     edge_acquisition_enable_serial_debug(candidate_acquisition, session->app->config->serial_port,
         session->app->config->serial_rs485, acquisition_serial);
     if (candidate_acquisition == NULL ||
@@ -901,6 +929,13 @@ static void handle_config(edge_ws_session *session, iot_edge_v1_Envelope *envelo
         edge_runtime_config_free(&candidate);
         send_config_result(session, commit->revision, commit->sha256.bytes, false,
                            "config_runtime_invalid", apply_error);
+        return;
+    }
+    if (!edge_acquisition_prepare_io_swap(session->app->acquisition)) {
+        edge_acquisition_destroy(candidate_acquisition);
+        edge_runtime_config_free(&candidate);
+        send_config_result(session, commit->revision, commit->sha256.bytes, false,
+                           "io_outbox_busy", "external IO samples or results have not been queued");
         return;
     }
     ev_io_stop(session->app->loop, &session->app->acquisition_io);
@@ -1626,9 +1661,14 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         session->session_epoch = ack->session_epoch;
         session->enrolled = true;
         session->raw_telemetry = ack->raw_telemetry;
+        session->external_io = ack->external_io && ack->raw_telemetry && access("/etc/init.d/dtu-io", X_OK) == 0;
         if (!edge_acquisition_set_raw_telemetry(session->app->acquisition,
                                                session->config->id, session->raw_telemetry)) {
             edge_ws_transport_close(&session->transport, 1002, "cannot activate telemetry format");
+            return;
+        }
+        if (!edge_acquisition_set_external_io(session->app->acquisition, session->config->id, session->external_io)) {
+            edge_ws_transport_close(&session->transport, 1002, "cannot activate external IO");
             return;
         }
         syslog(LOG_INFO, "platform %s enrollment approved on existing WebSocket",
@@ -2309,6 +2349,7 @@ bool edge_ws_app_init(edge_ws_app *app, struct ev_loop *loop,
         acquisition_telemetry, acquisition_command_result, app);
     edge_acquisition_set_debug_callback(app->acquisition, acquisition_debug);
     edge_acquisition_set_dtu_callback(app->acquisition, acquisition_dtu);
+    edge_acquisition_set_io_callback(app->acquisition, acquisition_io_capability);
     edge_acquisition_enable_serial_debug(app->acquisition, config->serial_port,
         config->serial_rs485, acquisition_serial);
     char acquisition_error[256] = {0};
@@ -2442,9 +2483,13 @@ bool edge_ws_app_enqueue(edge_ws_app *app, const uint8_t origin_platform_id[16],
     const char *error = NULL;
     const bool encoded = edge_protocol_encode(envelope, app->wire,
                                                sizeof(app->wire), &wire_size, &error);
+    const bool priority = envelope->which_payload == iot_edge_v1_Envelope_command_result_tag ||
+        (envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag &&
+         envelope->payload.telemetry_batch.records_count == 1U &&
+         envelope->payload.telemetry_batch.records[0].protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO);
     if (!encoded || !edge_spool_outbox_put_priority(
             &session->spool, ack_id, app->wire, wire_size,
-            envelope->which_payload == iot_edge_v1_Envelope_command_result_tag)) {
+            priority)) {
         syslog(LOG_ERR, "cannot queue nanopb message for origin platform %s: %s",
                session->config->name, error != NULL ? error : "tmpfs spool rejected");
         edge_log_local_fault(origin_platform_id, NULL, 0U,

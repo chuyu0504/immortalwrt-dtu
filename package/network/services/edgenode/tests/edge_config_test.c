@@ -176,9 +176,58 @@ static void test_unknown_item_rejected(void) {
                  "unknown config item was accepted");
 }
 
+static void test_external_io_with_protocol(void) {
+    const uint8_t device_id[16] = {1U};
+    const uint8_t model_id[16] = {2U};
+    iot_edge_v1_ConfigItem values[4] = {0};
+    for (size_t i = 0; i < 4U; ++i) { values[i].revision = 8U; values[i].index = (uint32_t)i; }
+    values[0].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_ENDPOINT;
+    values[0].which_item = iot_edge_v1_ConfigItem_endpoint_tag;
+    iot_edge_v1_EndpointConfig *endpoint = &values[0].item.endpoint;
+    set_id(&endpoint->endpoint_id, sizeof(endpoint->endpoint_id.bytes), device_id);
+    endpoint->transport = iot_edge_v1_Transport_TRANSPORT_ETHERNET;
+    endpoint->mode = iot_edge_v1_LinkMode_LINK_MODE_TCP_CLIENT;
+    endpoint->protocol = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
+    strcpy(endpoint->ip, "127.0.0.1"); endpoint->port = 502; endpoint->enabled = true;
+    values[1].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DEVICE;
+    values[1].which_item = iot_edge_v1_ConfigItem_device_tag;
+    iot_edge_v1_DeviceConfig *device = &values[1].item.device;
+    set_id(&device->device_id, sizeof(device->device_id.bytes), device_id);
+    set_id(&device->endpoint_id, sizeof(device->endpoint_id.bytes), device_id);
+    strcpy(device->device_code, "device"); device->protocol = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
+    device->report_interval_sec = 5U; device->enabled = true;
+    for (size_t i = 2; i < 4U; ++i) {
+        values[i].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_EXTERNAL_IO;
+        values[i].which_item = iot_edge_v1_ConfigItem_external_io_tag;
+        iot_edge_v1_ExternalIoPointConfig *io = &values[i].item.external_io;
+        set_id(&io->device_id, sizeof(io->device_id.bytes), device_id);
+        set_id(&io->model_id, sizeof(io->model_id.bytes), model_id);
+        snprintf(io->point_id, sizeof(io->point_id), "00000000-0000-4000-8000-%012u", (unsigned)i);
+        strcpy(io->name, "IO"); io->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO;
+        snprintf(io->channel, sizeof(io->channel), "do%u", (unsigned)(i - 2));
+    }
+    uint8_t payloads[4][EDGENODE_MAX_WS_MESSAGE];
+    edge_memory_config_item items[4] = {0};
+    for (size_t i = 0; i < 4U; ++i) {
+        items[i].payload = payloads[i]; items[i].present = true;
+        items[i].payload_size = encode_item(&values[i], payloads[i], sizeof(payloads[i]));
+    }
+    edge_memory_config_set snapshot = {.revision = 8U, .item_count = 4U, .received_count = 4U, .items = items};
+    edge_runtime_config runtime = {0}; char error[128] = {0};
+    require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), error);
+    edge_runtime_config_free(&runtime);
+    strcpy(values[3].item.external_io.channel, "do0");
+    items[3].payload_size = encode_item(&values[3], payloads[3], sizeof(payloads[3]));
+    require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), "duplicate output channel accepted");
+    strcpy(values[3].item.external_io.channel, "do7");
+    items[3].payload_size = encode_item(&values[3], payloads[3], sizeof(payloads[3]));
+    require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), "unknown output channel accepted");
+}
+
 int main(void) {
     test_valid_snapshot();
     test_unknown_item_rejected();
+    test_external_io_with_protocol();
     puts("edge config tests passed");
     return 0;
 }
