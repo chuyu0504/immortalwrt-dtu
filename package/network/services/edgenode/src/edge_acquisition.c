@@ -2824,7 +2824,7 @@ static void sl651_poll(edge_acquisition_device *device, uint64_t now) {
 static bool publish_acquisition_cycle(edge_acquisition_device *device,
                                        const uint8_t platform_id[16],
                                        iot_edge_v1_TelemetryRecord *record) {
-    if (device->external_io_enabled) {
+    if (device->raw_telemetry) {
         record->configuration_sha256.size = 32U;
         memcpy(record->configuration_sha256.bytes, device->configuration_digest, 32U);
     }
@@ -4026,7 +4026,7 @@ static bool worker_sl651_report(edge_acquisition_device *device,
     pb_ostream_t stream =
         pb_ostream_from_buffer(message.payload.telemetry, sizeof(message.payload.telemetry));
     iot_edge_v1_TelemetryRecord stamped = *record;
-    if (device->external_io_enabled) {
+    if (device->raw_telemetry) {
         stamped.configuration_sha256.size = 32U;
         memcpy(stamped.configuration_sha256.bytes, device->configuration_digest, 32U);
     }
@@ -4078,7 +4078,7 @@ static bool worker_telemetry(void *context,
     iot_edge_v1_TelemetryRecord stamped = *record;
     edge_acquisition_device *device = record->device_id.size == 16U
         ? find_device(context, platform_id, record->device_id.bytes) : NULL;
-    if (device && device->external_io_enabled) {
+    if (device && device->raw_telemetry) {
         stamped.configuration_sha256.size = 32U;
         memcpy(stamped.configuration_sha256.bytes, device->configuration_digest, 32U);
     }

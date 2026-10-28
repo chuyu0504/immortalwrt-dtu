@@ -187,6 +187,7 @@ static unsigned sl651_reports, sl651_results, sl651_images;
 static unsigned sl651_raw_frames;
 static bool sl651_store_report(void *context, const uint8_t platform[16], const iot_edge_v1_TelemetryRecord *record) {
     (void)context; (void)platform;
+    assert(record->configuration_sha256.size == (raw_fixture ? 32U : 0U));
     assert(record->protocol == iot_edge_v1_Protocol_PROTOCOL_SL651);
     assert(record->report_id.size == 16 && record->part_count >= (raw_fixture ? 1U : 2U) && record->part_index < record->part_count);
     if (record->raw_payloads_count) {
@@ -394,6 +395,8 @@ static bool store_response_record(void *context, const uint8_t platform_id[16],
                                   const iot_edge_v1_TelemetryRecord *record) {
     (void)context;
     (void)platform_id;
+    assert(record->configuration_sha256.size == (raw_fixture ? 32U : 0U));
+    if (raw_fixture) assert(record->configuration_sha256.bytes[0] == 0x6bU);
     assert(response_records++ == 0U);
     assert(record->protocol == (s7_responses ? iot_edge_v1_Protocol_PROTOCOL_S7
                                             : iot_edge_v1_Protocol_PROTOCOL_MODBUS));
@@ -488,6 +491,7 @@ static void verify_complete_acquisition_record(bool s7, bool link_debug, bool de
     assert(listen(listener, 1) == 0);
     iot_edge_v1_ConfigItem values[5];
     edge_runtime_config config = make_config(values);
+    memset(config.digest, 0x6b, sizeof(config.digest));
     values[0].item.endpoint.port = ntohs(address.sin_port);
     values[1].item.device.report_interval_sec = 300U;
     values[0].item.endpoint.debug_enabled = link_debug;
