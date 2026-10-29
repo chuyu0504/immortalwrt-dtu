@@ -4849,7 +4849,7 @@ static void external_io_tick(edge_acquisition *acquisition, uint64_t now) {
         edge_acquisition_device *device = &acquisition->devices[i];
         if (!acquisition->io_quiesce_requested && device->external_io_enabled && device->external_io_count && !device->external_io_pending && now >= device->external_io_next_ms) due = true;
     }
-    if (due || (!acquisition->io_quiesce_requested && now >= acquisition->io_next_read_ms && (acquisition->io_connected || now >= acquisition->io_reconnect_ms) && acquisition->io_enabled)) {
+    if (due || (!acquisition->io_quiesce_requested && now >= acquisition->io_next_read_ms && (acquisition->io_connected || now >= acquisition->io_reconnect_ms) && (acquisition->io_enabled || access("/etc/init.d/dtu-io", X_OK) == 0))) {
         edge_external_io_snapshot snapshot = {0};
         (void)read_external_io(acquisition, now, &snapshot);
         for (size_t i = 0; i < acquisition->device_count; ++i) {
