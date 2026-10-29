@@ -758,7 +758,47 @@ static void test_raw_exchange_packing(void) {
     free(record.raw_payloads); free(record.raw_requests);
 }
 
+static void test_full_io_capability_round_trip(void) {
+    const uint8_t platform_id[16] = {1}, random_bytes[10] = {2};
+    iot_edge_v1_Envelope envelope;
+    require(edge_protocol_init_envelope(&envelope, platform_id, NULL, 1, 1,
+                                       1784688030123LL, random_bytes), "capability envelope initialization failed");
+    envelope.which_payload = iot_edge_v1_Envelope_capability_report_tag;
+    iot_edge_v1_CapabilityReport *report = &envelope.payload.capability_report;
+    const iot_edge_v1_Protocol protocols[] = {
+        iot_edge_v1_Protocol_PROTOCOL_SL651, iot_edge_v1_Protocol_PROTOCOL_MODBUS,
+        iot_edge_v1_Protocol_PROTOCOL_S7, iot_edge_v1_Protocol_PROTOCOL_MC,
+        iot_edge_v1_Protocol_PROTOCOL_FINS, iot_edge_v1_Protocol_PROTOCOL_DLT645,
+        iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO
+    };
+    require(sizeof(protocols) <= sizeof(report->supported_protocols), "capability cannot fit seven protocols");
+    memcpy(report->supported_protocols, protocols, sizeof(protocols));
+    report->supported_protocols_count = sizeof(protocols) / sizeof(protocols[0]);
+    report->supports_external_io = true;
+    report->external_io_channels_count = 15;
+    for (unsigned i = 0; i < 15; ++i) {
+        iot_edge_v1_ExternalIoChannel *channel = &report->external_io_channels[i];
+        channel->kind = i < 4 ? iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DI :
+            i < 11 ? iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO : iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI;
+        snprintf(channel->channel, sizeof(channel->channel), "%s%u", i < 4 ? "di" : i < 11 ? "do" : "AI", i < 4 ? i : i < 11 ? i - 4 : i - 11);
+        channel->available = true;
+        channel->controllable = i >= 4 && i < 11;
+    }
+    uint8_t wire[EDGENODE_MAX_WS_MESSAGE];
+    size_t size = 0;
+    const char *error = NULL;
+    require(edge_protocol_encode(&envelope, wire, sizeof(wire), &size, &error), error ? error : "full IO capability encode failed");
+    iot_edge_v1_Envelope decoded = iot_edge_v1_Envelope_init_zero;
+    require(edge_protocol_decode(wire, size, &decoded, &error), error ? error : "full IO capability decode failed");
+    const iot_edge_v1_CapabilityReport *copy = &decoded.payload.capability_report;
+    require(copy->supported_protocols_count == 7 && copy->supported_protocols[6] == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO, "standalone IO protocol was lost");
+    require(copy->supports_external_io && copy->external_io_channels_count == 15, "full IO capability was lost");
+    require(copy->external_io_channels[10].controllable && !strcmp(copy->external_io_channels[14].channel, "AI3"), "IO channels changed on wire");
+    edge_protocol_release(&decoded);
+}
+
 int main(void) {
+    test_full_io_capability_round_trip();
     test_raw_exchange_packing();
     test_telemetry_size_packing();
     test_config_replay();

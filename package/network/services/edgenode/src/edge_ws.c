@@ -633,14 +633,16 @@ static bool send_capability_report(edge_ws_session *session, bool force) {
         }
     }
     report->supports_serial_debug = session->app->config->serial_port[0] != '\0';
-    report->supported_protocols_count = 7;
-    report->supported_protocols[0] = iot_edge_v1_Protocol_PROTOCOL_MODBUS;
-    report->supported_protocols[1] = iot_edge_v1_Protocol_PROTOCOL_S7;
-    report->supported_protocols[2] = iot_edge_v1_Protocol_PROTOCOL_SL651;
-    report->supported_protocols[3] = iot_edge_v1_Protocol_PROTOCOL_MC;
-    report->supported_protocols[4] = iot_edge_v1_Protocol_PROTOCOL_FINS;
-    report->supported_protocols[5] = iot_edge_v1_Protocol_PROTOCOL_DLT645;
-    report->supported_protocols[6] = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+    static const iot_edge_v1_Protocol protocols[] = {
+        iot_edge_v1_Protocol_PROTOCOL_MODBUS, iot_edge_v1_Protocol_PROTOCOL_S7,
+        iot_edge_v1_Protocol_PROTOCOL_SL651, iot_edge_v1_Protocol_PROTOCOL_MC,
+        iot_edge_v1_Protocol_PROTOCOL_FINS, iot_edge_v1_Protocol_PROTOCOL_DLT645,
+        iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO
+    };
+    _Static_assert(sizeof(protocols) <= sizeof(report->supported_protocols),
+                   "capability protocol array is too small");
+    report->supported_protocols_count = sizeof(protocols) / sizeof(protocols[0]);
+    memcpy(report->supported_protocols, protocols, sizeof(protocols));
     (void)edge_capability_collect_network(report, session->app->config->wan_interface);
     report->has_vpn = edge_vpn_collect_capability(&session->vpn, &report->vpn);
     if (session->app->config->serial_port[0] != '\0') {
