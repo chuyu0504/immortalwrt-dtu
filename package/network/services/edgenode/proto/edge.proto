@@ -8,6 +8,7 @@ enum Transport {
   TRANSPORT_UNSPECIFIED = 0;
   TRANSPORT_ETHERNET = 1;
   TRANSPORT_SERIAL = 2;
+  TRANSPORT_EXTERNAL_IO = 3;
 }
 
 enum LinkMode {

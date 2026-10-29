@@ -62,6 +62,12 @@ static bool valid_endpoint(const iot_edge_v1_EndpointConfig *value) {
     if (value->endpoint_id.size != 16U || value->protocol ==
                                                     iot_edge_v1_Protocol_PROTOCOL_UNSPECIFIED)
         return false;
+    if (value->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO ||
+        value->transport == iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO)
+        return value->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO &&
+               value->transport == iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO &&
+               value->mode == iot_edge_v1_LinkMode_LINK_MODE_UNSPECIFIED &&
+               !value->has_serial && !value->interface_name[0] && !value->ip[0] && !value->port;
     if (value->transport == iot_edge_v1_Transport_TRANSPORT_SERIAL)
         return value->mode == iot_edge_v1_LinkMode_LINK_MODE_SERIAL && value->has_serial &&
                value->serial.channel[0] != '\0' && value->serial.baud_rate >= 300U &&
@@ -108,7 +114,8 @@ static bool valid_device(const edge_runtime_config *config,
          (value->io_interval_ms < 1000U || value->io_interval_ms > 3600000U)) ||
         (value->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
          value->protocol != iot_edge_v1_Protocol_PROTOCOL_S7 &&
-         value->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651 && !edge_industrial_protocol(value->protocol)) || value->sl651_response_mode > 4)
+         value->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651 &&
+         value->protocol != iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO && !edge_industrial_protocol(value->protocol)) || value->sl651_response_mode > 4)
         return false;
     const iot_edge_v1_EndpointConfig *endpoint =
         edge_runtime_config_endpoint(config, value->endpoint_id.bytes);

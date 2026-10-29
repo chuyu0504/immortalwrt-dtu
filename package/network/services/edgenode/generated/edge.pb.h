@@ -13,7 +13,8 @@
 typedef enum _iot_edge_v1_Transport {
     iot_edge_v1_Transport_TRANSPORT_UNSPECIFIED = 0,
     iot_edge_v1_Transport_TRANSPORT_ETHERNET = 1,
-    iot_edge_v1_Transport_TRANSPORT_SERIAL = 2
+    iot_edge_v1_Transport_TRANSPORT_SERIAL = 2,
+    iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO = 3
 } iot_edge_v1_Transport;
 
 typedef enum _iot_edge_v1_LinkMode {
@@ -1221,8 +1222,8 @@ extern "C" {
 
 /* Helper constants for enums */
 #define _iot_edge_v1_Transport_MIN iot_edge_v1_Transport_TRANSPORT_UNSPECIFIED
-#define _iot_edge_v1_Transport_MAX iot_edge_v1_Transport_TRANSPORT_SERIAL
-#define _iot_edge_v1_Transport_ARRAYSIZE ((iot_edge_v1_Transport)(iot_edge_v1_Transport_TRANSPORT_SERIAL+1))
+#define _iot_edge_v1_Transport_MAX iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO
+#define _iot_edge_v1_Transport_ARRAYSIZE ((iot_edge_v1_Transport)(iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO+1))
 
 #define _iot_edge_v1_LinkMode_MIN iot_edge_v1_LinkMode_LINK_MODE_UNSPECIFIED
 #define _iot_edge_v1_LinkMode_MAX iot_edge_v1_LinkMode_LINK_MODE_SERIAL

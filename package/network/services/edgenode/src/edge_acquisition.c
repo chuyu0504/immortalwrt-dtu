@@ -3383,7 +3383,8 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
             if (endpoint == NULL || !endpoint->enabled ||
                 (device->protocol != iot_edge_v1_Protocol_PROTOCOL_MODBUS &&
                  device->protocol != iot_edge_v1_Protocol_PROTOCOL_S7 &&
-                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651 && !edge_industrial_protocol(device->protocol))) {
+                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_SL651 &&
+                 device->protocol != iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO && !edge_industrial_protocol(device->protocol))) {
                 free_devices(devices, output);
                 free_links(links, link_count);
                 set_error(error, error_size,
@@ -3561,6 +3562,16 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                               "SL651 cannot share a physical stream with a polling protocol");
                     return false;
                 }
+            if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO) {
+                if (endpoint->transport != iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO ||
+                    !source->external_io || !runtime->external_io_count || runtime->point_count) {
+                    free_devices(devices, output + 1U); free_links(links, link_count);
+                    set_error(error, error_size, "invalid standalone external IO device");
+                    return false;
+                }
+                ++output;
+                continue;
+            }
             const edge_device_protocol protocol =
                 device->protocol == iot_edge_v1_Protocol_PROTOCOL_MODBUS
                     ? EDGE_DEVICE_MODBUS : device->protocol == iot_edge_v1_Protocol_PROTOCOL_MC ? EDGE_DEVICE_MC :
@@ -3650,7 +3661,8 @@ static void acquisition_status_local(edge_acquisition *acquisition,
         iot_edge_v1_DeviceStatus *status = &report->devices[report->devices_count++];
         edge_protocol_set_bytes(&status->device_id, sizeof(status->device_id.bytes),
                                  device->config->device_id.bytes, 16U);
-        const bool connected = device->link->fd >= 0;
+        const bool connected = device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO
+            ? acquisition->io_connected : device->link->fd >= 0;
         if (connected) {
             copy_text(status->state, sizeof(status->state), "connected");
             status->client_count =
@@ -5012,6 +5024,7 @@ static void acquisition_worker(edge_acquisition *acquisition, int worker_fd) {
                 wrote_current_device = wrote_current_device || written_indices[written] == index;
             edge_acquisition_device *device = &acquisition->devices[index];
             if (!publish_derived_expiry(device)) continue;
+            if (device->config->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO) continue;
             if (serial_paused(device)) {
                 /* Manual control owns the port; leave other physical links running. */
             } else if (device->sl651) {
@@ -5269,7 +5282,8 @@ bool edge_acquisition_prepare_io_swap(edge_acquisition *acquisition) {
     edge_acquisition_message message = {.magic = EDGE_ACQUISITION_MAGIC, .type = EDGE_ACQUISITION_CONTROL_IO_QUIESCE,
                                         .report_token = acquisition->io_quiesce_token, .payload_size = 0U};
     if (send(acquisition->worker_fd, &message, acquisition_message_size(0U), MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)acquisition_message_size(0U)) return false;
-    const uint64_t deadline = monotonic_milliseconds() + 250U;
+    /* Allow the current bounded I/O exchange and one outbox retry to finish. */
+    const uint64_t deadline = monotonic_milliseconds() + EDGE_IO_TIMEOUT_MS + 1200U;
     while (monotonic_milliseconds() < deadline) {
         struct pollfd event = {.fd = acquisition->worker_fd, .events = POLLIN};
         (void)poll(&event, 1U, 10);

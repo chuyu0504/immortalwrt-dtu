@@ -1,8 +1,18 @@
 #include "edge_external_io.h"
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+unsigned edge_test_io_read_delay_ms;
+const char *edge_test_io_read_signal_path;
 
 bool edge_external_io_read(const char *socket_path, edge_external_io_snapshot *snapshot) {
     (void)socket_path;
+    if (edge_test_io_read_signal_path) {
+        const int signal = open(edge_test_io_read_signal_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (signal >= 0) close(signal);
+    }
+    if (edge_test_io_read_delay_ms) usleep(edge_test_io_read_delay_ms * 1000U);
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->supported = true;
     snapshot->count = 2;

@@ -176,7 +176,7 @@ static void test_unknown_item_rejected(void) {
                  "unknown config item was accepted");
 }
 
-static void test_external_io_with_protocol(void) {
+static void test_external_io_with_protocol(bool standalone) {
     const uint8_t device_id[16] = {1U};
     const uint8_t model_id[16] = {2U};
     iot_edge_v1_ConfigItem values[4] = {0};
@@ -206,6 +206,12 @@ static void test_external_io_with_protocol(void) {
         strcpy(io->name, "IO"); io->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO;
         snprintf(io->channel, sizeof(io->channel), "do%u", (unsigned)(i - 2));
     }
+    if (standalone) {
+        endpoint->protocol = device->protocol = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+        endpoint->transport = iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO;
+        endpoint->mode = iot_edge_v1_LinkMode_LINK_MODE_UNSPECIFIED;
+        endpoint->ip[0] = '\0'; endpoint->port = 0;
+    }
     uint8_t payloads[4][EDGENODE_MAX_WS_MESSAGE];
     edge_memory_config_item items[4] = {0};
     for (size_t i = 0; i < 4U; ++i) {
@@ -216,6 +222,17 @@ static void test_external_io_with_protocol(void) {
     edge_runtime_config runtime = {0}; char error[128] = {0};
     require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), error);
     edge_runtime_config_free(&runtime);
+    if (standalone) {
+        endpoint->transport = iot_edge_v1_Transport_TRANSPORT_ETHERNET;
+        items[0].payload_size = encode_item(&values[0], payloads[0], sizeof(payloads[0]));
+        require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), "IO with Ethernet accepted");
+        endpoint->transport = iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO;
+        strcpy(endpoint->interface_name, "br-lan");
+        items[0].payload_size = encode_item(&values[0], payloads[0], sizeof(payloads[0]));
+        require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), "IO with interface accepted");
+        endpoint->interface_name[0] = '\0';
+        items[0].payload_size = encode_item(&values[0], payloads[0], sizeof(payloads[0]));
+    }
     strcpy(values[3].item.external_io.channel, "do0");
     items[3].payload_size = encode_item(&values[3], payloads[3], sizeof(payloads[3]));
     require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), "duplicate output channel accepted");
@@ -227,7 +244,8 @@ static void test_external_io_with_protocol(void) {
 int main(void) {
     test_valid_snapshot();
     test_unknown_item_rejected();
-    test_external_io_with_protocol();
+    test_external_io_with_protocol(false);
+    test_external_io_with_protocol(true);
     puts("edge config tests passed");
     return 0;
 }

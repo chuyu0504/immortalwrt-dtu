@@ -2246,7 +2246,9 @@ static bool external_io_telemetry(void *context, const uint8_t platform_id[16], 
     return allow_external_io_commit;
 }
 
-static void verify_external_io_independent_of_protocol(void) {
+static void verify_external_io_independent_of_protocol(bool standalone) {
+    external_io_reports = 0;
+    allow_external_io_commit = false;
     iot_edge_v1_ConfigItem values[4];
     edge_runtime_config config = make_config(values);
     memset(config.digest, 0xa5, sizeof(config.digest));
@@ -2260,6 +2262,13 @@ static void verify_external_io_independent_of_protocol(void) {
     strcpy(point->point_id, "00000000-0000-4000-8000-000000000001");
     strcpy(point->name, "input"); strcpy(point->channel, "di0");
     point->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DI;
+    if (standalone) {
+        values[0].item.endpoint.transport = iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO;
+        values[0].item.endpoint.protocol = values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+        values[0].item.endpoint.mode = iot_edge_v1_LinkMode_LINK_MODE_UNSPECIFIED;
+        values[0].item.endpoint.ip[0] = '\0'; values[0].item.endpoint.port = 0;
+        values[2] = values[3]; config.item_count = 3;
+    }
     edge_acquisition_source source = {.platform_id = platform_id, .config = &config, .raw_telemetry = true, .external_io = true};
     edge_acquisition *acquisition = edge_acquisition_create(external_io_telemetry, command, NULL);
     assert(acquisition);
@@ -2294,7 +2303,8 @@ static bool external_io_command_callback(void *context, const uint8_t platform_i
     return external_io_command_results > 1U;
 }
 
-static void verify_external_io_command_readback(void) {
+static void verify_external_io_command_readback(bool standalone) {
+    external_io_command_results = 0;
     iot_edge_v1_ConfigItem values[4];
     edge_runtime_config config = make_config(values);
     config.item_count = 4;
@@ -2307,6 +2317,13 @@ static void verify_external_io_command_readback(void) {
     strcpy(point->point_id, "00000000-0000-4000-8000-000000000002");
     strcpy(point->name, "output"); strcpy(point->channel, "do0");
     point->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO;
+    if (standalone) {
+        values[0].item.endpoint.transport = iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO;
+        values[0].item.endpoint.protocol = values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+        values[0].item.endpoint.mode = iot_edge_v1_LinkMode_LINK_MODE_UNSPECIFIED;
+        values[0].item.endpoint.ip[0] = '\0'; values[0].item.endpoint.port = 0;
+        values[2] = values[3]; config.item_count = 3;
+    }
     edge_acquisition_source source = {.platform_id = platform_id, .config = &config, .raw_telemetry = true, .external_io = true};
     edge_acquisition *acquisition = edge_acquisition_create(telemetry, external_io_command_callback, NULL);
     assert(acquisition);
@@ -2391,11 +2408,41 @@ static void verify_node_io_without_device(void) {
     edge_acquisition_destroy(acquisition);
 }
 
+extern unsigned edge_test_io_read_delay_ms;
+extern const char *edge_test_io_read_signal_path;
+static void verify_io_swap_waits_for_current_read(void) {
+    const uint8_t platform_id[16] = {0x71};
+    edge_runtime_config config = {0};
+    edge_acquisition_source source = {.platform_id = platform_id, .config = &config, .external_io = true};
+    char signal_path[128];
+    snprintf(signal_path, sizeof(signal_path), "/tmp/edgenode-test-io-swap-%ld", (long)getpid());
+    (void)unlink(signal_path);
+    edge_test_io_read_delay_ms = 600;
+    edge_test_io_read_signal_path = signal_path;
+    edge_acquisition *acquisition = edge_acquisition_create(telemetry, command, NULL);
+    char error[256] = {0};
+    assert(acquisition && edge_acquisition_apply_multi(acquisition, &source, 1, monotonic_ms(), error, sizeof(error)));
+    assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    const uint64_t deadline = monotonic_ms() + 2000;
+    while (access(signal_path, F_OK) != 0 && monotonic_ms() < deadline) usleep(1000);
+    assert(access(signal_path, F_OK) == 0);
+    const uint64_t start = monotonic_ms();
+    assert(edge_acquisition_prepare_io_swap(acquisition));
+    assert(monotonic_ms() - start >= 400);
+    edge_acquisition_destroy(acquisition);
+    edge_test_io_read_delay_ms = 0;
+    edge_test_io_read_signal_path = NULL;
+    assert(unlink(signal_path) == 0);
+}
+
 int main(void) {
     if (getenv("EDGE_TEST_EXTERNAL_IO_ONLY")) {
-        verify_external_io_independent_of_protocol();
-        verify_external_io_command_readback();
+        verify_external_io_independent_of_protocol(false);
+        verify_external_io_independent_of_protocol(true);
+        verify_external_io_command_readback(false);
+        verify_external_io_command_readback(true);
         verify_node_io_without_device();
+        verify_io_swap_waits_for_current_read();
         return 0;
     }
     const char *local_log = "/tmp/edgenode-test-acquisition/logs/acquisition.log";
@@ -2436,8 +2483,10 @@ int main(void) {
     wait_for_status(acquisition);
     edge_acquisition_destroy(acquisition);
     verify_shared_resources();
-    verify_external_io_independent_of_protocol();
-    verify_external_io_command_readback();
+    verify_external_io_independent_of_protocol(false);
+    verify_external_io_independent_of_protocol(true);
+    verify_external_io_command_readback(false);
+    verify_external_io_command_readback(true);
     verify_stale_deadline_over_ipc();
     verify_acknowledged_write_with_offline_readback();
     verify_pty_partial_write_is_not_replayed();
