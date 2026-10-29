@@ -42,6 +42,7 @@
 
 static void send_pending_modem_result(edge_ws_session *session);
 static bool send_capability_report(edge_ws_session *session, bool force);
+static bool send_io_status(edge_ws_session *session);
 
 static void invalidate_command_clock(edge_ws_session *session) {
     const bool was_valid = session->command_clock.valid;
@@ -350,8 +351,10 @@ static void acquisition_io_capability(void *context, const edge_external_io_snap
     edge_ws_app *app = context;
     for (size_t i = 0; i < app->config->platform_count; ++i) {
         edge_ws_session *session = &app->sessions[i];
-        if (session->websocket_open && session->enrolled)
+        if (session->websocket_open && session->enrolled) {
             (void)send_capability_report(session, false);
+            (void)send_io_status(session);
+        }
     }
 }
 
@@ -547,6 +550,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_device_config = true;
     hello->supports_raw_telemetry = true;
     hello->supports_external_io = access("/etc/init.d/dtu-io", X_OK) == 0;
+    hello->supports_node_io = hello->supports_external_io;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
     safe_copy(hello->log_level, sizeof(hello->log_level), edge_log_level());
@@ -579,6 +583,30 @@ static bool send_hello(edge_ws_session *session) {
         session->hello_sent_monotonic_ms = 0U;
         invalidate_command_clock(session);
     }
+    return sent;
+}
+
+static bool send_io_status(edge_ws_session *session) {
+    if (!session->node_io || !session->websocket_open || !session->enrolled) return false;
+    const edge_external_io_snapshot *io = edge_acquisition_io_capability(session->app->acquisition);
+    if (!io || !io->supported) return false;
+    iot_edge_v1_Envelope *output = &session->app->envelope;
+    if (!init_envelope(session,output)) return false;
+    output->which_payload = iot_edge_v1_Envelope_external_io_status_tag;
+    iot_edge_v1_ExternalIoStatus *status = &output->payload.external_io_status;
+    status->observed_at_ms = now_ms();
+    status->channels_count = (pb_size_t)io->count;
+    for (size_t i=0; i<io->count; ++i) {
+        iot_edge_v1_ExternalIoChannel *channel = &status->channels[i];
+        safe_copy(channel->channel,sizeof(channel->channel),io->channels[i].channel);
+        channel->kind=io->channels[i].kind;
+        channel->available=io->channels[i].available;
+        channel->controllable=io->channels[i].controllable;
+        channel->has_value=io->channels[i].available;
+        channel->value=io->channels[i].value;
+    }
+    const bool sent=send_envelope(session,output);
+    if (!sent) edge_ws_transport_close(&session->transport,1011,"IO status enqueue failed");
     return sent;
 }
 
@@ -1002,6 +1030,8 @@ static void handle_device_command(edge_ws_session *session,
     char error[257] = {0};
     uint64_t start_before_monotonic_ms = 0U;
     uint64_t mapping_valid_until_monotonic_ms = 0U;
+    if (request->node_io_channel[0] && !session->node_io)
+        safe_copy(error,sizeof(error),"node IO control was not negotiated");
     if (!request->has_start_before_ms ||
         !edge_command_clock_deadline(&session->command_clock,
                                      request->start_before_ms, monotonic_ms(),
@@ -1030,8 +1060,8 @@ static void handle_device_command(edge_ws_session *session,
     iot_edge_v1_CommandResult result = iot_edge_v1_CommandResult_init_zero;
     edge_protocol_set_bytes(&result.command_id, sizeof(result.command_id.bytes),
                             command_id, sizeof(command_id));
-    edge_protocol_set_bytes(&result.device_id, sizeof(result.device_id.bytes),
-                            device_id, sizeof(device_id));
+    if (request->node_io_channel[0]) safe_copy(result.node_io_channel,sizeof(result.node_io_channel),request->node_io_channel);
+    else edge_protocol_set_bytes(&result.device_id,sizeof(result.device_id.bytes),device_id,sizeof(device_id));
     result.state = iot_edge_v1_CommandState_COMMAND_STATE_REJECTED;
     result.completed_at_ms = now_ms();
     safe_copy(result.message, sizeof(result.message),
@@ -1662,6 +1692,7 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         session->enrolled = true;
         session->raw_telemetry = ack->raw_telemetry;
         session->external_io = ack->external_io && ack->raw_telemetry && access("/etc/init.d/dtu-io", X_OK) == 0;
+        session->node_io = session->external_io && ack->node_io;
         if (!edge_acquisition_set_raw_telemetry(session->app->acquisition,
                                                session->config->id, session->raw_telemetry)) {
             edge_ws_transport_close(&session->transport, 1002, "cannot activate telemetry format");
@@ -1683,6 +1714,7 @@ static void websocket_message(void *user, void *data, size_t size, bool binary) 
         ev_timer_start(session->app->loop, &session->status_report_timer);
         clear_report_snapshots(session);
         send_capability_report(session, true);
+        (void)send_io_status(session);
         send_device_status(session, true);
         confirm_network_for_session(session);
         report_network_rollback(session->app);

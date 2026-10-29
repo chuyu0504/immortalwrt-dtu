@@ -2314,10 +2314,67 @@ static void verify_external_io_command_readback(void) {
     edge_acquisition_destroy(acquisition);
 }
 
+static unsigned node_io_results;
+static bool node_io_result(void *context, const uint8_t platform[16], const iot_edge_v1_CommandResult *result) {
+    (void)context; (void)platform;
+    assert(result->device_id.size==0 && !strcmp(result->node_io_channel,"do0"));
+    assert(result->state==iot_edge_v1_CommandState_COMMAND_STATE_SUCCEEDED && result->actual_values_count==1);
+    ++node_io_results;
+    return true;
+}
+
+static void verify_node_io_without_device(void) {
+    const uint8_t platform[16]={0x61}, command_id[16]={0x62};
+    edge_runtime_config config={0};
+    edge_acquisition_source source={.platform_id=platform,.config=&config,.raw_telemetry=true,.external_io=true};
+    edge_acquisition *acquisition=edge_acquisition_create(telemetry,node_io_result,NULL);
+    char error[256]={0};
+    assert(acquisition && edge_acquisition_apply_multi(acquisition,&source,1U,monotonic_ms(),error,sizeof(error)));
+    assert(edge_acquisition_start(acquisition,error,sizeof(error)));
+    const uint64_t deadline=monotonic_ms()+5000U;
+    while (!edge_acquisition_io_capability(acquisition)->supported && monotonic_ms()<deadline) {
+        struct pollfd event={.fd=edge_acquisition_event_fd(acquisition),.events=POLLIN};
+        (void)poll(&event,1,20);edge_acquisition_tick(acquisition,monotonic_ms());
+    }
+    assert(edge_acquisition_io_capability(acquisition)->supported);
+    iot_edge_v1_CommandRequest request=iot_edge_v1_CommandRequest_init_zero;
+    set_id(&request.command_id,command_id);
+    request.external_io=true;request.has_start_before_ms=true;request.values_count=1;
+    strcpy(request.node_io_channel,"do0");strcpy(request.values[0].element_id,"do0");
+    request.values[0].has_expected=true;request.values[0].expected.which_value=iot_edge_v1_ScalarValue_string_value_tag;
+    strcpy(request.values[0].expected.value.string_value,"1");
+    assert(edge_acquisition_command_for_platform_until(acquisition,platform,&request,deadline,deadline,error,sizeof(error)));
+    while (!node_io_results && monotonic_ms()<deadline) {
+        struct pollfd event={.fd=edge_acquisition_event_fd(acquisition),.events=POLLIN};
+        (void)poll(&event,1,20);edge_acquisition_tick(acquisition,monotonic_ms());
+    }
+    assert(node_io_results==1);
+    strcpy(request.node_io_channel,"di0");strcpy(request.values[0].element_id,"di0");
+    assert(!edge_acquisition_command_for_platform_until(acquisition,platform,&request,deadline,deadline,error,sizeof(error)));
+    edge_acquisition_stop(acquisition);
+    iot_edge_v1_ConfigItem items[4];
+    edge_runtime_config bound=make_config(items);bound.item_count=4;
+    items[3]=(iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+    items[3].kind=iot_edge_v1_ConfigItemKind_CONFIG_ITEM_EXTERNAL_IO;
+    items[3].which_item=iot_edge_v1_ConfigItem_external_io_tag;
+    const uint8_t device_id[16]={2}, model_id[16]={4}, other[16]={0x63};
+    iot_edge_v1_ExternalIoPointConfig *point=&items[3].item.external_io;
+    set_id(&point->device_id,device_id);set_id(&point->model_id,model_id);
+    strcpy(point->point_id,"00000000-0000-4000-8000-000000000002");strcpy(point->name,"owned output");strcpy(point->channel,"do0");point->kind=iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO;
+    edge_acquisition_source sources[2]={source,source};sources[0].config=&bound;sources[1].platform_id=other;
+    assert(edge_acquisition_apply_multi(acquisition,sources,2U,monotonic_ms(),error,sizeof(error)));
+    assert(edge_acquisition_start(acquisition,error,sizeof(error)));
+    strcpy(request.node_io_channel,"do0");strcpy(request.values[0].element_id,"do0");
+    const uint64_t bound_deadline=monotonic_ms()+5000U;
+    assert(!edge_acquisition_command_for_platform_until(acquisition,other,&request,bound_deadline,bound_deadline,error,sizeof(error)));
+    edge_acquisition_destroy(acquisition);
+}
+
 int main(void) {
     if (getenv("EDGE_TEST_EXTERNAL_IO_ONLY")) {
         verify_external_io_independent_of_protocol();
         verify_external_io_command_readback();
+        verify_node_io_without_device();
         return 0;
     }
     const char *local_log = "/tmp/edgenode-test-acquisition/logs/acquisition.log";

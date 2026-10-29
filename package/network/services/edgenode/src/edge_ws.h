@@ -79,6 +79,7 @@ typedef struct {
     bool enrolled;
     bool raw_telemetry;
     bool external_io;
+    bool node_io;
     bool terminal_open;
     bool terminal_output_pending;
     bool terminal_output_sent;

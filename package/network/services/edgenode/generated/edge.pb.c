@@ -36,6 +36,9 @@ PB_BIND(iot_edge_v1_CapabilityReport, iot_edge_v1_CapabilityReport, 4)
 PB_BIND(iot_edge_v1_ExternalIoChannel, iot_edge_v1_ExternalIoChannel, AUTO)
 
 
+PB_BIND(iot_edge_v1_ExternalIoStatus, iot_edge_v1_ExternalIoStatus, 2)
+
+
 PB_BIND(iot_edge_v1_TcpTraffic, iot_edge_v1_TcpTraffic, AUTO)
 
 
