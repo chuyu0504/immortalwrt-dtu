@@ -342,7 +342,28 @@ static void verify_sl651_commit(void) {
         sl651_pump(acquisition, 20U);
     assert(sl651_results == prior_results + 1U);
     n = sl651_read(acquisition, fd, bytes, sizeof(bytes));
-    assert(n >= 25 && bytes[n - 3] == 4);
+    /* TCP may split the queued continuation ACKs and the final commit ACK. */
+    size_t received = n > 0 ? (size_t)n : 0U, consumed = 0U;
+    bool committed = false;
+    until = monotonic_ms() + 6000U;
+    while (!committed && monotonic_ms() < until) {
+        while (received - consumed >= 25U) {
+            const uint8_t *ack = bytes + consumed;
+            assert(ack[0] == 0x7EU && ack[1] == 0x7EU && ack[10] == 0x4CU && ack[11] == 0x80U && ack[12] == 8U);
+            assert(edge_sl651_crc(ack,23U) == (uint16_t)((uint16_t)ack[23] << 8U | ack[24]));
+            assert(ack[22] == 6U || ack[22] == 4U);
+            consumed += 25U;
+            if (ack[22] == 4U) { committed = true; break; }
+        }
+        if (committed) break;
+        if (consumed) {memmove(bytes,bytes + consumed,received - consumed);received -= consumed;consumed = 0U;}
+        assert(received < sizeof(bytes));
+        const ssize_t more = sl651_read(acquisition, fd, bytes + received, sizeof(bytes) - received);
+        assert(more > 0);
+        received += (size_t)more;
+    }
+    assert(committed);
+
 
     const unsigned before_timeout = sl651_results;
     const uint8_t timeout_command_id[16] = {11};
