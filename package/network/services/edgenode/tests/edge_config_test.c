@@ -179,8 +179,8 @@ static void test_unknown_item_rejected(void) {
 static void test_external_io_with_protocol(bool standalone) {
     const uint8_t device_id[16] = {1U};
     const uint8_t model_id[16] = {2U};
-    iot_edge_v1_ConfigItem values[4] = {0};
-    for (size_t i = 0; i < 4U; ++i) { values[i].revision = 8U; values[i].index = (uint32_t)i; }
+    iot_edge_v1_ConfigItem values[6] = {0};
+    for (size_t i = 0; i < 6U; ++i) { values[i].revision = 8U; values[i].index = (uint32_t)i; }
     values[0].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_ENDPOINT;
     values[0].which_item = iot_edge_v1_ConfigItem_endpoint_tag;
     iot_edge_v1_EndpointConfig *endpoint = &values[0].item.endpoint;
@@ -212,8 +212,8 @@ static void test_external_io_with_protocol(bool standalone) {
         endpoint->mode = iot_edge_v1_LinkMode_LINK_MODE_UNSPECIFIED;
         endpoint->ip[0] = '\0'; endpoint->port = 0;
     }
-    uint8_t payloads[4][EDGENODE_MAX_WS_MESSAGE];
-    edge_memory_config_item items[4] = {0};
+    uint8_t payloads[6][EDGENODE_MAX_WS_MESSAGE];
+    edge_memory_config_item items[6] = {0};
     for (size_t i = 0; i < 4U; ++i) {
         items[i].payload = payloads[i]; items[i].present = true;
         items[i].payload_size = encode_item(&values[i], payloads[i], sizeof(payloads[i]));
@@ -222,6 +222,38 @@ static void test_external_io_with_protocol(bool standalone) {
     edge_runtime_config runtime = {0}; char error[128] = {0};
     require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), error);
     edge_runtime_config_free(&runtime);
+
+    iot_edge_v1_DerivedPointInput inputs[2] = {iot_edge_v1_DerivedPointInput_init_zero,
+                                              iot_edge_v1_DerivedPointInput_init_zero};
+    strcpy(inputs[0].alias, "s");
+    strcpy(inputs[0].point_id, values[2].item.external_io.point_id);
+    strcpy(inputs[1].alias, "x");
+    strcpy(inputs[1].point_id, "derived_first");
+    for (size_t i = 4; i < 6U; ++i) {
+        values[i].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT;
+        values[i].which_item = iot_edge_v1_ConfigItem_derived_point_tag;
+        iot_edge_v1_DerivedPointConfig *rule = &values[i].item.derived_point;
+        set_id(&rule->device_id, sizeof(rule->device_id.bytes), device_id);
+        strcpy(rule->point_id, i == 4 ? "derived_first" : "derived_second");
+        strcpy(rule->name, i == 4 ? "first" : "second");
+        strcpy(rule->kind, "expression");
+        strcpy(rule->expression, i == 4 ? "if(s, 1, 0)" : "x * 2");
+        rule->inputs = &inputs[i - 4];
+        rule->inputs_count = 1;
+        rule->max_age_seconds = 30;
+        items[i].payload = payloads[i];
+        items[i].present = true;
+        items[i].payload_size = encode_item(&values[i], payloads[i], sizeof(payloads[i]));
+    }
+    snapshot.item_count = snapshot.received_count = 6U;
+    require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)),
+                 "encoded IO-derived chain was rejected");
+    edge_runtime_config_free(&runtime);
+    strcpy(inputs[0].point_id, "missing_io");
+    items[4].payload_size = encode_item(&values[4], payloads[4], sizeof(payloads[4]));
+    require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)),
+                 "missing IO dependency was accepted");
+    snapshot.item_count = snapshot.received_count = 4U;
     if (standalone) {
         endpoint->transport = iot_edge_v1_Transport_TRANSPORT_ETHERNET;
         items[0].payload_size = encode_item(&values[0], payloads[0], sizeof(payloads[0]));

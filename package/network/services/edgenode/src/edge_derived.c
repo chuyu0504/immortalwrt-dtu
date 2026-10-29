@@ -202,6 +202,8 @@ static const char *point_id(const iot_edge_v1_ConfigItem *item, const uint8_t *d
         case iot_edge_v1_ConfigItem_s7_area_tag: POINT(s7_area);
         case iot_edge_v1_ConfigItem_sl651_element_tag: POINT(sl651_element);
         case iot_edge_v1_ConfigItem_industrial_point_tag: POINT(industrial_point);
+        case iot_edge_v1_ConfigItem_external_io_tag:
+            return memcmp(item->item.external_io.device_id.bytes, device, 16) ? NULL : item->item.external_io.point_id;
         case iot_edge_v1_ConfigItem_derived_point_tag:
             return memcmp(item->item.derived_point.device_id.bytes, device, 16) ? NULL : item->item.derived_point.point_id;
         default: return NULL;

@@ -14,7 +14,77 @@ static iot_edge_v1_TelemetryValue sample(const char *id, double value, const cha
     out.has_value=true; out.value.which_value=iot_edge_v1_ScalarValue_double_value_tag; out.value.value.double_value=value;
     return out;
 }
+static void test_external_io_dependencies(void) {
+    iot_edge_v1_ConfigItem items[3] = {iot_edge_v1_ConfigItem_init_zero,
+                                       iot_edge_v1_ConfigItem_init_zero,
+                                       iot_edge_v1_ConfigItem_init_zero};
+    items[0].which_item = iot_edge_v1_ConfigItem_external_io_tag;
+    items[0].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_EXTERNAL_IO;
+    items[0].item.external_io.device_id.size = 16;
+    items[0].item.external_io.device_id.bytes[0] = 1;
+    strcpy(items[0].item.external_io.point_id, "output");
+
+    iot_edge_v1_DerivedPointInput inputs[2] = {iot_edge_v1_DerivedPointInput_init_zero,
+                                              iot_edge_v1_DerivedPointInput_init_zero};
+    strcpy(inputs[0].alias, "s");
+    strcpy(inputs[0].point_id, "output");
+    strcpy(inputs[1].alias, "x");
+    strcpy(inputs[1].point_id, "numeric_output");
+    for (size_t index = 1; index < 3; ++index) {
+        items[index].which_item = iot_edge_v1_ConfigItem_derived_point_tag;
+        items[index].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_DERIVED_POINT;
+        iot_edge_v1_DerivedPointConfig *rule = &items[index].item.derived_point;
+        rule->device_id.size = 16;
+        rule->device_id.bytes[0] = 1;
+        strcpy(rule->name, index == 1 ? "numeric output" : "chained output");
+        strcpy(rule->point_id, index == 1 ? "numeric_output" : "chained_output");
+        strcpy(rule->kind, "expression");
+        strcpy(rule->expression, index == 1 ? "if(s, 1, 0)" : "x * 2");
+        rule->inputs = &inputs[index - 1];
+        rule->inputs_count = 1;
+        rule->max_age_seconds = 30;
+    }
+    edge_runtime_config config = {0};
+    config.items = items;
+    config.item_count = 3;
+    check(edge_derived_validate_config(&config), "external IO derived chain rejected");
+
+    items[0].item.external_io.device_id.bytes[0] = 2;
+    check(!edge_derived_validate_config(&config), "external IO from another device accepted");
+    items[0].item.external_io.device_id.bytes[0] = 1;
+    strcpy(items[0].item.external_io.point_id, "numeric_output");
+    check(!edge_derived_validate_config(&config), "duplicate external IO and derived ID accepted");
+    strcpy(items[0].item.external_io.point_id, "output");
+    iot_edge_v1_ConfigItem swap = items[1];
+    items[1] = items[2];
+    items[2] = swap;
+    check(!edge_derived_validate_config(&config), "unordered derived dependency accepted");
+    swap = items[1];
+    items[1] = items[2];
+    items[2] = swap;
+
+    edge_derived *state = edge_derived_create(&config, items[1].item.derived_point.device_id.bytes);
+    check(state != NULL, "external IO derived state creation failed");
+    iot_edge_v1_TelemetryValue value = sample("output", 0, "");
+    value.value.kind = iot_edge_v1_ValueKind_VALUE_BOOL;
+    value.value.which_value = iot_edge_v1_ScalarValue_bool_value_tag;
+    value.value.value.bool_value = true;
+    iot_edge_v1_TelemetryValue result[2];
+    check(edge_derived_update(state, &value, 1, 1000), "external IO true sample ignored");
+    edge_derived_values(state, result);
+    check(result[0].has_value && result[0].value.value.double_value == 1 &&
+          result[1].has_value && result[1].value.value.double_value == 2,
+          "external IO true chain failed");
+    value.value.value.bool_value = false;
+    check(edge_derived_update(state, &value, 1, 2000), "external IO false sample ignored");
+    edge_derived_values(state, result);
+    check(result[0].has_value && result[0].value.value.double_value == 0 &&
+          result[1].has_value && result[1].value.value.double_value == 0,
+          "external IO false chain failed");
+    edge_derived_free(state);
+}
 int main(void) {
+    test_external_io_dependencies();
     double value;
     check(edge_expression_evaluate("if(x > 10,\n x*2, 1/0)",variable,NULL,&value) && value==24,"short circuit");
     check(!edge_expression_evaluate("1/0",variable,NULL,&value),"division by zero");
