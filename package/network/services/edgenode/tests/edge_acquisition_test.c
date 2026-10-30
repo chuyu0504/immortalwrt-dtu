@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <arpa/inet.h>
@@ -36,6 +37,7 @@ static void copy_text(char *output, size_t capacity, const char *input) {
 static void receive_modbus_request(int fd, uint8_t request[12]);
 
 static bool raw_fixture;
+extern int64_t edge_test_io_ai_microamps;
 
 static bool telemetry(void *context, const uint8_t platform_id[16],
                       const iot_edge_v1_TelemetryRecord *record) {
@@ -2294,6 +2296,62 @@ static void verify_external_io_independent_of_protocol(bool standalone) {
     edge_acquisition_destroy(acquisition);
 }
 
+static unsigned external_io_current_reports;
+static double expected_current_milliamps;
+
+static bool external_io_current_telemetry(void *context, const uint8_t platform_id[16],
+                                          const iot_edge_v1_TelemetryRecord *record) {
+    (void)context; (void)platform_id;
+    if (record->protocol != iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO) return true;
+    assert(record->values_count == 1U && record->values[0].has_value);
+    assert(!strcmp(record->values[0].unit, "mA"));
+    assert(record->values[0].value.kind == iot_edge_v1_ValueKind_VALUE_DOUBLE);
+    assert(record->values[0].value.which_value == iot_edge_v1_ScalarValue_double_value_tag);
+    assert(fabs(record->values[0].value.value.double_value - expected_current_milliamps) < 0.0000001);
+    ++external_io_current_reports;
+    return true;
+}
+
+static void verify_external_io_current(void) {
+    const int64_t microamps[] = {4000, 12345, 20000};
+    for (size_t i = 0; i < sizeof(microamps) / sizeof(microamps[0]); ++i) {
+        edge_test_io_ai_microamps = microamps[i];
+        expected_current_milliamps = (double)microamps[i] / 1000.0;
+        external_io_current_reports = 0;
+        iot_edge_v1_ConfigItem values[4];
+        edge_runtime_config config = make_config(values);
+        memset(config.digest, 0xa5, sizeof(config.digest));
+        values[0].item.endpoint.transport = iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO;
+        values[0].item.endpoint.protocol = values[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+        values[0].item.endpoint.mode = iot_edge_v1_LinkMode_LINK_MODE_UNSPECIFIED;
+        values[0].item.endpoint.ip[0] = '\0'; values[0].item.endpoint.port = 0;
+        values[2] = (iot_edge_v1_ConfigItem)iot_edge_v1_ConfigItem_init_zero;
+        values[2].kind = iot_edge_v1_ConfigItemKind_CONFIG_ITEM_EXTERNAL_IO;
+        values[2].which_item = iot_edge_v1_ConfigItem_external_io_tag;
+        iot_edge_v1_ExternalIoPointConfig *point = &values[2].item.external_io;
+        const uint8_t device_id[16] = {2U}, model_id[16] = {4U}, platform_id[16] = {6U};
+        set_id(&point->device_id, device_id); set_id(&point->model_id, model_id);
+        strcpy(point->point_id, "00000000-0000-4000-8000-000000000001");
+        strcpy(point->name, "current"); strcpy(point->channel, "AI0"); strcpy(point->unit, "mA");
+        point->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI;
+        config.item_count = 3;
+        edge_acquisition_source source = {.platform_id = platform_id, .config = &config, .raw_telemetry = true, .external_io = true};
+        edge_acquisition *acquisition = edge_acquisition_create(external_io_current_telemetry, command, NULL);
+        assert(acquisition);
+        char error[256] = {0};
+        assert(edge_acquisition_apply_multi(acquisition, &source, 1U, monotonic_ms(), error, sizeof(error)));
+        assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+        const uint64_t deadline = monotonic_ms() + 5000U;
+        while (!external_io_current_reports && monotonic_ms() < deadline) {
+            struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+            (void)poll(&event, 1U, 20);
+            edge_acquisition_tick(acquisition, monotonic_ms());
+        }
+        assert(external_io_current_reports);
+        edge_acquisition_destroy(acquisition);
+    }
+}
+
 static unsigned external_io_command_results;
 static bool external_io_command_callback(void *context, const uint8_t platform_id[16], const iot_edge_v1_CommandResult *result) {
     (void)context; (void)platform_id;
@@ -2437,6 +2495,7 @@ static void verify_io_swap_waits_for_current_read(void) {
 
 int main(void) {
     if (getenv("EDGE_TEST_EXTERNAL_IO_ONLY")) {
+        verify_external_io_current();
         verify_external_io_independent_of_protocol(false);
         verify_external_io_independent_of_protocol(true);
         verify_external_io_command_readback(false);
@@ -2483,6 +2542,7 @@ int main(void) {
     wait_for_status(acquisition);
     edge_acquisition_destroy(acquisition);
     verify_shared_resources();
+    verify_external_io_current();
     verify_external_io_independent_of_protocol(false);
     verify_external_io_independent_of_protocol(true);
     verify_external_io_command_readback(false);

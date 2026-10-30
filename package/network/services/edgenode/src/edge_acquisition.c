@@ -4813,9 +4813,9 @@ static bool prepare_external_io(edge_acquisition_device *device, const edge_exte
             if (strcmp(channel->channel, point->channel) || channel->kind != point->kind || !channel->available) continue;
             value->has_value = true;
             if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI) {
-                value->value.kind = iot_edge_v1_ValueKind_VALUE_SIGNED;
-                value->value.which_value = iot_edge_v1_ScalarValue_signed_value_tag;
-                value->value.value.signed_value = channel->value;
+                value->value.kind = iot_edge_v1_ValueKind_VALUE_DOUBLE;
+                value->value.which_value = iot_edge_v1_ScalarValue_double_value_tag;
+                value->value.value.double_value = (double)channel->value / 1000.0;
             } else {
                 value->value.kind = iot_edge_v1_ValueKind_VALUE_BOOL;
                 value->value.which_value = iot_edge_v1_ScalarValue_bool_value_tag;

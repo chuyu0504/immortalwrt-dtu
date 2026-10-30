@@ -550,6 +550,7 @@ static bool send_hello(edge_ws_session *session) {
     hello->supports_device_config = true;
     hello->supports_raw_telemetry = true;
     hello->supports_external_io = access("/etc/init.d/dtu-io", X_OK) == 0;
+    hello->supports_external_io_milliamps = hello->supports_external_io;
     hello->supports_node_io = hello->supports_external_io;
     hello->network_config_version = 3U;
     hello->supports_logs = true;
@@ -602,8 +603,13 @@ static bool send_io_status(edge_ws_session *session) {
         channel->kind=io->channels[i].kind;
         channel->available=io->channels[i].available;
         channel->controllable=io->channels[i].controllable;
-        channel->has_value=io->channels[i].available;
-        channel->value=io->channels[i].value;
+        if (channel->available && channel->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI) {
+            channel->which_value = iot_edge_v1_ExternalIoChannel_milliamps_tag;
+            channel->value.milliamps = (double)io->channels[i].value / 1000.0;
+        } else if (channel->available) {
+            channel->which_value = iot_edge_v1_ExternalIoChannel_digital_value_tag;
+            channel->value.digital_value = io->channels[i].value != 0;
+        }
     }
     const bool sent=send_envelope(session,output);
     if (!sent) edge_ws_transport_close(&session->transport,1011,"IO status enqueue failed");

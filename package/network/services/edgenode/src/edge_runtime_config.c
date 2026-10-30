@@ -249,7 +249,8 @@ static bool valid_external_io(const edge_runtime_config *config, uint32_t index)
             point->channel[2] < '0' || point->channel[2] > '6' || point->unit[0]) return false;
     } else if (point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI) {
         if (strlen(point->channel) != 3U || strncmp(point->channel, "AI", 2U) ||
-            point->channel[2] < '0' || point->channel[2] > '3' || strcmp(point->unit, "uA")) return false;
+            point->channel[2] < '0' || point->channel[2] > '3' ||
+            strcmp(point->unit, "mA")) return false;
     } else {
         return false;
     }

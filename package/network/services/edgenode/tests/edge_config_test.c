@@ -223,6 +223,21 @@ static void test_external_io_with_protocol(bool standalone) {
     require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), error);
     edge_runtime_config_free(&runtime);
 
+    iot_edge_v1_ExternalIoPointConfig *analog = &values[2].item.external_io;
+    analog->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI;
+    strcpy(analog->channel, "AI0");
+    strcpy(analog->unit, "mA");
+    items[2].payload_size = encode_item(&values[2], payloads[2], sizeof(payloads[2]));
+    require_true(edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), "mA AI configuration rejected");
+    edge_runtime_config_free(&runtime);
+    strcpy(analog->unit, "uA");
+    items[2].payload_size = encode_item(&values[2], payloads[2], sizeof(payloads[2]));
+    require_true(!edge_runtime_config_load(&runtime, &snapshot, error, sizeof(error)), "old AI wire unit accepted");
+    analog->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO;
+    strcpy(analog->channel, "do0");
+    analog->unit[0] = '\0';
+    items[2].payload_size = encode_item(&values[2], payloads[2], sizeof(payloads[2]));
+
     iot_edge_v1_DerivedPointInput inputs[2] = {iot_edge_v1_DerivedPointInput_init_zero,
                                               iot_edge_v1_DerivedPointInput_init_zero};
     strcpy(inputs[0].alias, "s");

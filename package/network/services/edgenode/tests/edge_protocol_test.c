@@ -758,6 +758,41 @@ static void test_raw_exchange_packing(void) {
     free(record.raw_payloads); free(record.raw_requests);
 }
 
+static void test_io_status_round_trip(void) {
+    const uint8_t platform_id[16] = {1}, random_bytes[10] = {2};
+    iot_edge_v1_Envelope envelope;
+    require(edge_protocol_init_envelope(&envelope, platform_id, NULL, 1, 1,
+                                        1784688030123LL, random_bytes), "IO status initialization failed");
+    envelope.which_payload = iot_edge_v1_Envelope_external_io_status_tag;
+    iot_edge_v1_ExternalIoStatus *status = &envelope.payload.external_io_status;
+    status->observed_at_ms = 1784688030123LL;
+    status->channels_count = 2;
+    iot_edge_v1_ExternalIoChannel *digital = &status->channels[0];
+    strcpy(digital->channel, "do0");
+    digital->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO;
+    digital->available = true;
+    digital->which_value = iot_edge_v1_ExternalIoChannel_digital_value_tag;
+    digital->value.digital_value = false;
+    iot_edge_v1_ExternalIoChannel *analog = &status->channels[1];
+    strcpy(analog->channel, "AI0");
+    analog->kind = iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI;
+    analog->available = true;
+    analog->which_value = iot_edge_v1_ExternalIoChannel_milliamps_tag;
+    analog->value.milliamps = 12.345;
+    uint8_t wire[EDGENODE_MAX_WS_MESSAGE];
+    size_t size = 0;
+    const char *error = NULL;
+    require(edge_protocol_encode(&envelope, wire, sizeof(wire), &size, &error), error ? error : "IO status encode failed");
+    iot_edge_v1_Envelope decoded = iot_edge_v1_Envelope_init_zero;
+    require(edge_protocol_decode(wire, size, &decoded, &error), error ? error : "IO status decode failed");
+    const iot_edge_v1_ExternalIoStatus *copy = &decoded.payload.external_io_status;
+    require(copy->channels_count == 2 && copy->channels[0].which_value == iot_edge_v1_ExternalIoChannel_digital_value_tag &&
+            !copy->channels[0].value.digital_value, "off output state was lost");
+    require(copy->channels[1].which_value == iot_edge_v1_ExternalIoChannel_milliamps_tag &&
+            copy->channels[1].value.milliamps == 12.345, "mA current was lost");
+    edge_protocol_release(&decoded);
+}
+
 static void test_full_io_capability_round_trip(void) {
     const uint8_t platform_id[16] = {1}, random_bytes[10] = {2};
     iot_edge_v1_Envelope envelope;
@@ -798,6 +833,7 @@ static void test_full_io_capability_round_trip(void) {
 }
 
 int main(void) {
+    test_io_status_round_trip();
     test_full_io_capability_round_trip();
     test_raw_exchange_packing();
     test_telemetry_size_packing();
