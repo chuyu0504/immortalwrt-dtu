@@ -1,15 +1,21 @@
 #include "edge_ws_transport.h"
 
+#include <errno.h>
 #include <limits.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <syslog.h>
 
 #if defined(LWS_WITHOUT_EXTENSIONS) || !defined(LWS_WITH_LIBEV)
 #error "EdgeNode requires libwebsockets permessage-deflate and built-in libev support"
 #endif
 
 #define EDGE_WS_QUEUE_LIMIT (256U * 1024U)
+#define EDGE_WS_UNACKNOWLEDGED_TIMEOUT_MS 10000U
 
 struct edge_ws_packet {
     edge_ws_packet *next;
@@ -46,11 +52,22 @@ static int websocket_callback(struct lws *socket, enum lws_callback_reasons reas
         if (user && strcmp(user, "permessage-deflate") == 0)
             snprintf(input, size, "compression_level=9; mem_level=8");
         break;
-    case LWS_CALLBACK_CLIENT_ESTABLISHED:
+    case LWS_CALLBACK_CLIENT_ESTABLISHED: {
+        /* A stuck uplink must reconnect; the per-platform outbox keeps its
+         * unacknowledged telemetry and command results for replay. */
+        const unsigned int timeout = EDGE_WS_UNACKNOWLEDGED_TIMEOUT_MS;
+        const int fd = lws_get_socket_fd(socket);
+        if (fd < 0 || setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT,
+                                 &timeout, sizeof(timeout)) != 0) {
+            syslog(LOG_ERR, "cannot configure websocket TCP user timeout: %s",
+                   fd < 0 ? "socket unavailable" : strerror(errno));
+            return -1;
+        }
         transport->socket = socket;
         transport->connected = true;
         transport->opened(transport->user);
         break;
+    }
     case LWS_CALLBACK_CLIENT_RECEIVE:
         if (transport->closing) return -1;
         if (!transport->incoming_size)

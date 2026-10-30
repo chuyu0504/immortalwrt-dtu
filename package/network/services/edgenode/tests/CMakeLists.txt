@@ -75,6 +75,15 @@ if(EDGENODE_WS_TRANSPORT_TESTS)
     add_test(NAME edge_ws_transport COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_LIST_DIR}/edge_ws_transport_test.py" "$<TARGET_FILE:edge_ws_transport_fixture>")
     set_tests_properties(edge_ws_transport PROPERTIES TIMEOUT 45)
+    add_executable(edge_ws_recovery_fixture edge_ws_recovery_fixture.c
+        "${EDGENODE_ROOT}/src/edge_ws_transport.c"
+        "${EDGENODE_ROOT}/src/edge_outbox.c")
+    target_include_directories(edge_ws_recovery_fixture PRIVATE
+        "${EDGENODE_ROOT}/src" "${LWS_INCLUDE_DIR}" "${LWS_CONFIG_INCLUDE_DIR}" "${LIBEV_INCLUDE_DIR}")
+    target_link_libraries(edge_ws_recovery_fixture PRIVATE "${LWS_LIBRARY}" "${LIBEV_LIBRARY}")
+    add_test(NAME edge_ws_recovery COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_LIST_DIR}/edge_ws_recovery_test.py" "$<TARGET_FILE:edge_ws_recovery_fixture>")
+    set_tests_properties(edge_ws_recovery PROPERTIES TIMEOUT 40)
     add_executable(edge_identity_test edge_identity_test.c)
     target_include_directories(edge_identity_test PRIVATE
         "${EDGENODE_ROOT}/src" "${LWS_INCLUDE_DIR}" "${LWS_CONFIG_INCLUDE_DIR}" "${LIBEV_INCLUDE_DIR}")
