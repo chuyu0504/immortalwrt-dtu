@@ -27,6 +27,8 @@
 #define OUTPUTS 7
 #define LABEL_SIZE 97
 #define SAMPLE_MS 20
+#define AI_SAMPLE_MS 1000
+#define AI_TIMEOUT_MS 1000
 
 struct pin {
 	const char *id, *name, *kind;
@@ -170,8 +172,13 @@ static void ai_timeout(struct uloop_timeout *timer)
 static void ai_query(struct uloop_timeout *timer)
 {
 	const char command[] = "AT+AIREAD\r\n";
-	uloop_timeout_set(timer, 2000);
+	uloop_timeout_set(timer, AI_SAMPLE_MS);
 	if (!supported || hardware_error[0])
+		return;
+	/* The query tick and response deadline can become ready together.
+	 * Never flush an in-flight reply or replace its parser/deadline. If the
+	 * query runs first, skip this tick and let the deadline finish it. */
+	if (ai_waiting)
 		return;
 	if (ai_port.fd < 0 && !ai_open())
 		return;
@@ -183,7 +190,7 @@ static void ai_query(struct uloop_timeout *timer)
 		return;
 	}
 	ai_waiting = true;
-	uloop_timeout_set(&ai_deadline, 1000);
+	uloop_timeout_set(&ai_deadline, AI_TIMEOUT_MS);
 }
 
 static void defaults(struct configuration *next)
@@ -423,6 +430,7 @@ static int status_method(struct ubus_context *ctx, struct ubus_object *object,
 	blobmsg_add_string(&reply, "version", "1.0.0");
 	blobmsg_add_u8(&reply, "supported", supported);
 	blobmsg_add_u32(&reply, "sample_ms", SAMPLE_MS);
+	blobmsg_add_u32(&reply, "ai_sample_ms", AI_SAMPLE_MS);
 	blobmsg_add_string(&reply, "error", hardware_error);
 	blobmsg_add_string(&reply, "config_error", config_error);
 	struct statfs config_fs;
