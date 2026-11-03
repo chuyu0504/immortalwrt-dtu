@@ -27,6 +27,7 @@ harness = r'''
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/types.h>
 #define TCIFLUSH 0
 struct uloop_timeout { int delay; bool armed; };
 static struct uloop_timeout ai_timer, ai_deadline;
@@ -43,7 +44,7 @@ static bool ai_open(void) { ai_port.fd = 7; return true; }
 static void ai_close(void) { ++closed; ai_port.fd = -1; }
 static int tcflush(int fd, int mode)
 { assert(fd == 7 && mode == TCIFLUSH); ++flushes; return 0; }
-static size_t write(int fd, const void *data, size_t count)
+static ssize_t write(int fd, const void *data, size_t count)
 {
     assert(fd == 7 && count == 11 && !memcmp(data, "AT+AIREAD\r\n", count));
     ++writes;
