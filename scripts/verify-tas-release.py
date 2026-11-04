@@ -89,9 +89,9 @@ for profile in (('ebyte_ecm30',) if ecm30 else ('tastek_it692', 'tastek_it694'))
             continue
         name = path.name.lower()
         with path.open('rb') as stream:
-            prefix = stream.read(128)
+            file_prefix = stream.read(128)
         if ('private' in name or name.endswith('.key') or 'host_key' in name or
-                name in ('id_rsa', 'id_ed25519') or b'PRIVATE KEY-----' in prefix or
+                name in ('id_rsa', 'id_ed25519') or b'PRIVATE KEY-----' in file_prefix or
                 path == root / 'etc/config/4ginfo'):
             mode = stat.S_IMODE(path.stat().st_mode)
             assert not mode & 0o077, 'private key permissions: ' + str(path.relative_to(root))
