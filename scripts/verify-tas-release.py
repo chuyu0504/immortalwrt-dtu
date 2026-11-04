@@ -21,7 +21,7 @@ ecm30 = device == 'ecm30'
 prefix = 'immortalwrt-sunxi-cortexa7' if ecm30 else 'immortalwrt-ramips-mt76x8'
 manifest = (output / (prefix + ('-ebyte_ecm30' if ecm30 else '') + '.manifest')).read_text()
 packages = dict(line.split(' - ', 1) for line in manifest.splitlines() if ' - ' in line)
-assert packages['edgenode'] == '0.3.80-r1'
+assert packages['edgenode'] == '0.3.81-r1'
 for package in ('tcpdump-mini', 'luci-base', 'luci-app-edgenode', 'firewall4', 'busybox'):
     assert package in packages, package
 checksums = dict((line.split()[-1].lstrip('*'), line.split()[0])
@@ -58,7 +58,7 @@ for profile in (('ebyte_ecm30',) if ecm30 else ('tastek_it692', 'tastek_it694'))
     subprocess.run([str(checkout / 'staging_dir/host/bin/unsquashfs4'), '-no-progress',
                     '-d', str(root), str(squashfs)], check=True, stdout=subprocess.DEVNULL)
     binary = root / 'usr/sbin/edgenode'
-    assert b'0.3.80' in binary.read_bytes()
+    assert b'0.3.81' in binary.read_bytes()
     if ecm30:
         assert 'dtu-io' in packages and (root / 'usr/sbin/dtu-io').is_file()
         assert (root / 'etc/init.d/dtu-io').stat().st_mode & 0o111
