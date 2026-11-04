@@ -4,6 +4,35 @@ This directory contains a small C daemon and an OpenWrt package recipe. It has n
 runtime, full protobuf runtime, or database dependency. This package repository is the
 sole source location for the OpenWrt node implementation and its node-side tests.
 
+## 平台传输故障隔离（0.3.80）
+
+- 每个平台使用独立网络子进程运行 DNS、TCP、TLS、WebSocket 和压缩处理。
+  子进程卡住或退出只触发对应平台的断线／重连，不在主事件循环内执行库连接或销毁。
+  主进程退出时，内核同时终止网络子进程；正常停止及重连使用非阻塞回收。
+- 主进程与每个平台通过独立的非阻塞 `SOCK_SEQPACKET` 通道通信。
+  发送队列端到端限制为 256 KiB／256 条，只有网络子进程完成 LWS 写入后才归还额度，
+  IPC 转交不提前释放额度；原有 64 KiB 业务节流继续生效。IPC 内核发送缓冲分别设置为 64 KiB
+  （Linux 实际计账会加倍）；单条业务消息仍限制为 16 KiB。
+  主进程每 10 ms 最多处理每个平台的四条入站消息，避免消息洪泛独占分发。
+  入站通道过载会断开对应平台；已入 outbox 的可靠消息继续按原 ACK／重连机制补发。
+- 子进程每秒报告自身事件循环进度。连接阶段 30 秒、已连接阶段 10 秒没有进度时，
+  只终止该平台的网络子进程并通知既有重连机制；这不替代平台握手、ACK 和 WS 保活。
+- HTTP/WS、HTTPS/WSS、证书校验、permessage-deflate、平台协议、终端及固件分块接口保持兼容。
+  IPC 增加约一个至两个 10 ms 调度周期的传输延迟；额外进程和缓冲需要在目标设备验证内存余量。
+- 入站消息独立解码和释放，不再复用全局出站缓冲区，避免异常文本／空消息释放旧出站数据，
+  也避免发送回复时覆盖仍在处理的请求。流量统计通过仅在连接回调期间借用的 socket FD
+  获取真实连接信息；回调结束立即关闭副本，不保留失效连接。
+- 隔离边界是平台连接和消息状态。采集调度器、物理 I/O、设备网络、固件升级及系统资源
+  按设计继续共享，所有业务处理仍由主进程协调；不承诺整机资源耗尽或设备变更无全局影响。
+- `edge_ws_isolation` 使用同一应用进程同时连接健康与故障平台，验证同步连接卡住、
+  SIGSTOP、SIGKILL、队列满、回调内销毁、消息洪泛、超大消息、子进程进度超时、
+  HTTPS 成功与不可信证书拒绝；测试还启用 libev 子进程回收以覆盖与主程序的兼容性。
+- `edge_ws_application_compile` 同时编译真实主程序接入代码。
+  `tests/edge_platform_e2e.py` 在独立网络／挂载命名空间中运行最终固件的 EdgeNode，
+  同时对接 HTTP 和 HTTPS 模拟平台并打开两个真实 PTY。故障平台被冻结、崩溃、发送文本、
+  空消息和错误平台身份时，验证健康平台不重连、终端 PID／变量不变、上报持续正常。
+  使用最终解包 rootfs 的一次性副本运行；测试只修改副本配置和信任库，不连接生产平台或刷机。
+
 ## 本地故障诊断（0.3.68）
 
 - `/tmp/edgenode/logs/acquisition.log` 默认记录全部六种采集协议：SL651、Modbus RTU/TCP、S7、MC、FINS、DLT645。记录配置应用、连接和握手、帧解析、测点不完整、读错误、报告构造和 Worker IPC、父进程 outbox 入队／发送及 ACK 超时；写命令失败仅记录结果及“已开始／已确认”标志，不把超时记成确定未执行。被动 SL651 收帧损坏、缓冲区溢出、拼包与发送失败也记脱敏原因码。DTU、VPN、固件升级、蜂窝模块及网络配置的可观测操作失败另有固定事件码。不会为了记日志增加 PLC 请求、自动重发写或更改协议行为。

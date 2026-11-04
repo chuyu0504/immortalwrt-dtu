@@ -60,6 +60,9 @@ int main(void) {
     require(edge_spool_init(&spool, platform, 1), "restore reduced-limit spool");
     require(spool.outbox.count == 2, "protected backlog lost on restart");
     const edge_memory_message *saved = edge_spool_outbox_first(&spool);
+    /* Directory enumeration order is not an outbox identity guarantee. */
+    while (saved != NULL && memcmp(saved->message_id, one, 16) != 0)
+        saved = saved->next;
     require(saved != NULL && saved->payload_size == a && memcmp(saved->payload, first, a) == 0,
             "restored sample changed its original configuration identity");
     require(edge_spool_outbox_put_priority(&spool, one, retry, retry_size, true), "same payload in a new envelope rejected after limit reduction");

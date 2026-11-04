@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include "edge_sl651.h"
 #include <poll.h>

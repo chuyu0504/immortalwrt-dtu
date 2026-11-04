@@ -318,7 +318,7 @@ static void send_dtu_status(edge_ws_session *session) {
     if (!session->websocket_open || !session->enrolled) return;
     for (size_t i = 0; i < session->dtu_status_count; ++i) {
         if (!session->dtu_status_dirty[i]) continue;
-        if (session->transport.queued_bytes >= 65536) break;
+        if (edge_ws_transport_queued_bytes(&session->transport) >= 65536) break;
         iot_edge_v1_Envelope *envelope = &session->app->envelope;
         if (!init_envelope(session, envelope)) return;
         envelope->which_payload = iot_edge_v1_Envelope_dtu_status_tag;
@@ -368,7 +368,7 @@ static void acquisition_serial(void *context, const uint8_t platform_id[16],
     session->serial_debug_sequence = event->sequence;
     if (!strcmp(event->kind, "closed")) session->serial_debug_active = false;
     // Sequence gaps identify discarded monitoring samples without blocking acquisition.
-    if (session->transport.queued_bytes >= 65536) return;
+    if (edge_ws_transport_queued_bytes(&session->transport) >= 65536) return;
     iot_edge_v1_Envelope *envelope = &app->envelope;
     if (!init_envelope(session, envelope)) return;
     envelope->which_payload = iot_edge_v1_Envelope_serial_debug_event_tag;
@@ -454,7 +454,7 @@ static bool acquisition_command_result(void *context,
     uint8_t command_id[16];
     memcpy(command_id, result->command_id.bytes, sizeof(command_id));
     char summary[160];
-    snprintf(summary, sizeof(summary), "actualValues=%u message=%s",
+    snprintf(summary, sizeof(summary), "actualValues=%u message=%.120s",
              (unsigned)result->actual_values_count, result->message);
     log_uuid_task(session, "device-command", command_id,
                   command_state_name(result->state), summary);
@@ -479,7 +479,7 @@ static void send_outbox_window(edge_ws_session *session) {
         return;
     while (session->spool.outbox.in_flight < EDGE_OUTBOX_WINDOW) {
         /* Do not start ACK deadlines for an unbounded local socket backlog. */
-        if (session->transport.queued_bytes >= 65536) return;
+        if (edge_ws_transport_queued_bytes(&session->transport) >= 65536) return;
         const edge_memory_message *message =
             edge_spool_outbox_next(&session->spool, monotonic_ms());
         if (message == NULL)
@@ -764,7 +764,7 @@ static void websocket_open(void *user) {
     edge_ws_session *session = user;
     edge_traffic_register(&session->app->traffic,
         (size_t)(session - session->app->sessions),
-        lws_get_socket_fd(session->transport.socket));
+        edge_ws_transport_socket_fd(&session->transport));
     session->websocket_open = true;
     session->hello_sent_monotonic_ms = 0U;
     invalidate_command_clock(session);
@@ -1432,7 +1432,7 @@ static void handle_firmware_update(edge_ws_session *session,
                  : iot_edge_v1_FirmwareUpdateState_FIRMWARE_UPDATE_FAILED,
         accepted ? "firmware update accepted" : message, 0U, total_bytes, 0U);
     char summary[160];
-    snprintf(summary, sizeof(summary), "bytes=%" PRIu64 " %s",
+    snprintf(summary, sizeof(summary), "bytes=%" PRIu64 " %.120s",
              total_bytes, accepted ? "transport=ws" : message);
     log_uuid_task(session, "firmware-update", request_id,
                   accepted ? "accepted" : "rejected", summary);
@@ -1651,24 +1651,10 @@ static void handle_terminal_open(edge_ws_session *session,
     ev_timer_start(session->app->loop, &session->terminal_timer);
 }
 
-static void websocket_message(void *user, void *data, size_t size, bool binary) {
-    edge_ws_session *session = user;
-    iot_edge_v1_Envelope *envelope = &session->app->envelope;
-    const char *error = NULL;
-    if (!binary || !edge_protocol_decode(data, size, envelope, &error) ||
-        !valid_origin(session, envelope)) {
-        syslog(LOG_WARNING, "platform %s sent invalid nanopb envelope: %s",
-               session->config->name, error != NULL ? error : "wrong origin");
-        edge_log_local_fault(session->config->id, NULL, 0U,
-                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 8U);
-        edge_protocol_release(envelope);
-        edge_ws_transport_close(&session->transport, 1002, "invalid envelope");
-        return;
-    }
-    // Telemetry flows node -> platform only. Release unexpected dynamic payloads
-    // before any handler can reuse the shared output envelope.
+static void dispatch_platform_message(edge_ws_session *session,
+                                      iot_edge_v1_Envelope *envelope) {
+    // Telemetry is node -> platform only; the receive wrapper owns allocations.
     if (envelope->which_payload == iot_edge_v1_Envelope_telemetry_batch_tag) {
-        edge_protocol_release(envelope);
         edge_ws_transport_close(&session->transport, 1002, "unexpected telemetry");
         return;
     }
@@ -1966,6 +1952,26 @@ static void status_report_timer(struct ev_loop *loop, struct ev_timer *timer, in
     (void)send_status_report(session_from_status_report(timer));
 }
 
+static void websocket_message(void *user, void *data, size_t size, bool binary) {
+    edge_ws_session *session = user;
+    /* Never decode into the shared output scratch buffer. A text/empty frame
+     * must not release another platform's last outbound telemetry pointers,
+     * and sending a reply must not overwrite the request still being handled. */
+    iot_edge_v1_Envelope incoming = iot_edge_v1_Envelope_init_zero;
+    const char *error = NULL;
+    if (!binary || !edge_protocol_decode(data, size, &incoming, &error) ||
+        !valid_origin(session, &incoming)) {
+        syslog(LOG_WARNING, "platform %s sent invalid nanopb envelope: %s",
+               session->config->name, error != NULL ? error : "wrong origin or frame type");
+        edge_log_local_fault(session->config->id, NULL, 0U,
+                             EDGE_LOCAL_FAULT_PROTOCOL_DECODE, 8U);
+        edge_ws_transport_close(&session->transport, 1002, "invalid envelope");
+    } else {
+        dispatch_platform_message(session, &incoming);
+    }
+    edge_protocol_release(&incoming);
+}
+
 static void status_timer(struct ev_loop *loop, struct ev_timer *timer, int events) {
     (void)loop;
     (void)events;
@@ -2036,7 +2042,7 @@ static void firmware_timer(struct ev_loop *loop, struct ev_timer *timer, int eve
                          result.progress_percent);
     char summary[160];
     snprintf(summary, sizeof(summary), "progress=%u bytes=%" PRIu64 "/%" PRIu64
-             " message=%s", result.progress_percent, result.downloaded_bytes,
+             " message=%.80s", result.progress_percent, result.downloaded_bytes,
              result.total_bytes, message);
     log_uuid_task(session, "firmware-update", request_id,
                   firmware_state_name(state), summary);

@@ -719,7 +719,7 @@ static void test_raw_exchange_packing(void) {
     require(record.raw_payloads && record.raw_requests, "exchange fixture");
     for (unsigned i = 0; i < FRAMES; ++i) {
         record.raw_payloads[i] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(3000));
-        record.raw_requests[i] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(i ? 31 : 0));
+        record.raw_requests[i] = malloc(PB_BYTES_ARRAY_T_ALLOCSIZE((i ? 31 : 0)));
         require(record.raw_payloads[i] && record.raw_requests[i], "exchange allocation");
         record.raw_payloads[i]->size=3000; memset(record.raw_payloads[i]->bytes, (int)i, 3000);
         record.raw_requests[i]->size=(pb_size_t)(i ? 31 : 0);
