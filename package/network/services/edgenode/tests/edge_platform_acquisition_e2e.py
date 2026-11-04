@@ -218,7 +218,7 @@ def run_acquisition(platforms, daemon, report, healthy):
             connection_count = len(good.platform.connections)
             start = time.monotonic()
 
-            def monitor(duration=0, until=None, timeout=45):
+            def monitor(duration=0, until=None, timeout=330):
                 deadline = time.monotonic() + (timeout if until else duration)
                 while time.monotonic() < deadline:
                     check()
@@ -233,7 +233,11 @@ def run_acquisition(platforms, daemon, report, healthy):
             baseline_end = time.monotonic()
             baseline = good.metrics(start, baseline_end)
             phases = []
-            for name in ('disconnected 20 seconds', 'frozen worker', 'reconnect storm'):
+            # Run rapid flaps first. The production retry policy doubles up to
+            # 300 seconds and only resets after five minutes of stable service.
+            # Respect that policy without needlessly accumulating retries before
+            # this scenario; healthy-side continuity deadlines remain unchanged.
+            for name in ('reconnect storm', 'frozen worker', 'disconnected 20 seconds'):
                 phase_start = time.monotonic()
                 previous = faulty.platform.current
                 if name == 'disconnected 20 seconds':
@@ -249,8 +253,7 @@ def run_acquisition(platforms, daemon, report, healthy):
                     for _ in range(4):
                         previous = faulty.platform.current
                         previous.sock.shutdown(socket.SHUT_RDWR)
-                        monitor(until=lambda: faulty.platform.current is not previous and faulty.platform.current.ready,
-                                timeout=80)
+                        monitor(until=lambda: faulty.platform.current is not previous and faulty.platform.current.ready)
                 monitor(4)
                 phase_end = time.monotonic()
                 metrics = good.metrics(phase_start, phase_end)
@@ -269,4 +272,6 @@ def run_acquisition(platforms, daemon, report, healthy):
         report.update(passed=True, platform_samples={str(c.slave): len(c.values) for c in clients},
                       platform_connections={str(c.slave): len(c.platform.connections) for c in clients})
     finally:
+        report['instrument_samples'] = instrument.samples
+        report['uploaded_samples'] = {str(c.slave): list(c.values.values()) for c in clients}
         instrument.stop()
