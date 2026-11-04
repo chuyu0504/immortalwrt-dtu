@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pull-and-build release driver, invoked only after local changes are pushed.
-Usage: build-tas-release.py EXPECTED_COMMIT OUTPUT_DIRECTORY
+Usage: build-tas-release.py EXPECTED_COMMIT OUTPUT_DIRECTORY [tas|ecm30]
 """
 import fcntl
 import hashlib
@@ -13,6 +13,13 @@ import sys
 
 checkout = Path('/home/openwrtbuild/immortalwrt-dtu')
 commit, output_arg = sys.argv[1:3]
+device = sys.argv[3] if len(sys.argv) > 3 else 'tas'
+assert device in ('tas', 'ecm30')
+ecm30 = device == 'ecm30'
+seed = 'configs/ebyte-ecm30.config' if ecm30 else 'configs/tastek-mt76x8.config'
+target_name = 'sunxi/cortexa7' if ecm30 else 'ramips/mt76x8'
+target_config = 'CONFIG_TARGET_sunxi_cortexa7=y' if ecm30 else 'CONFIG_TARGET_ramips_mt76x8=y'
+prefix = 'immortalwrt-sunxi-cortexa7' if ecm30 else 'immortalwrt-ramips-mt76x8'
 output = Path(output_arg).resolve()
 assert output.is_relative_to(Path('/home/openwrtbuild/releases'))
 output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -49,21 +56,28 @@ try:
     for feed, revision in (('packages', '84bd86384928955b568988ca0e09e2c78c75173d'),
                            ('luci', 'd6167ea0645cbd1327708d85f94824f42d0eb872')):
         assert git('-C', 'feeds/' + feed, 'rev-parse', 'HEAD') == revision
-    shutil.copy2(checkout / 'configs/tastek-mt76x8.config', checkout / '.config')
+    shutil.copy2(checkout / seed, checkout / '.config')
     run(['make', 'defconfig'], 'defconfig', 1200)
-    if 'CONFIG_TARGET_ramips_mt76x8=y' not in old_config:
+    if target_config not in old_config:
         run(['make', 'clean'], 'target-change-clean', 1800)
     run(['make', '-j16'], 'image-build')
-    target = checkout / 'bin/targets/ramips/mt76x8'
-    names = ['immortalwrt-ramips-mt76x8-' + profile + '-squashfs-sysupgrade.bin'
-             for profile in ('tastek_it692', 'tastek_it694')]
-    for name in names + ['immortalwrt-ramips-mt76x8.manifest', 'sha256sums', 'profiles.json',
+    target = checkout / 'bin/targets' / target_name
+    profiles = ('ebyte_ecm30',) if ecm30 else ('tastek_it692', 'tastek_it694')
+    names = [prefix + '-' + profile + '-squashfs-sysupgrade.bin' for profile in profiles]
+    if ecm30:
+        recovery = list(target.glob(prefix + '-ebyte_ecm30-*initramfs*'))
+        assert recovery, 'missing RAM recovery image'
+        names += [path.name for path in recovery if path.is_file()]
+    manifest = prefix + ('-ebyte_ecm30' if ecm30 else '') + '.manifest'
+    for name in names + [manifest, 'sha256sums', 'profiles.json',
                           'config.buildinfo', 'feeds.buildinfo', 'version.buildinfo']:
         shutil.copy2(target / name, output / name)
-    shutil.copy2(checkout / 'configs/tastek-mt76x8.config', output / 'seed.config')
+    shutil.copy2(checkout / seed, output / 'seed.config')
     shutil.copy2(checkout / '.config', output / 'build.config')
     (output / 'source.commit').write_text(commit + '\n')
-    run(['python3', 'scripts/verify-tas-release.py', str(checkout), str(output)], 'verify-images', 1200)
+    run(['python3', 'scripts/verify-tas-release.py', str(checkout), str(output), device], 'verify-images', 1200)
+    if ecm30:
+        run(['python3', 'scripts/test-ecm30-upgrade.py'], 'upgrade-safety-tests', 1200)
     assert git('status', '--porcelain', '--untracked-files=all') == ''
     status('images-verified', images=names)
 except BaseException as error:

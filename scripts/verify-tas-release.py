@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Verify both final mt76x8 images; retain pristine rootfs trees for inspection.
-Usage: verify-tas-release.py CHECKOUT ARTIFACT_DIRECTORY
+Usage: verify-tas-release.py CHECKOUT ARTIFACT_DIRECTORY [tas|ecm30]
 """
 import hashlib
 import json
@@ -11,10 +11,15 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 
 
 checkout, output = (Path(value).resolve() for value in sys.argv[1:3])
-manifest = (output / 'immortalwrt-ramips-mt76x8.manifest').read_text()
+device = sys.argv[3] if len(sys.argv) > 3 else 'tas'
+assert device in ('tas', 'ecm30')
+ecm30 = device == 'ecm30'
+prefix = 'immortalwrt-sunxi-cortexa7' if ecm30 else 'immortalwrt-ramips-mt76x8'
+manifest = (output / (prefix + ('-ebyte_ecm30' if ecm30 else '') + '.manifest')).read_text()
 packages = dict(line.split(' - ', 1) for line in manifest.splitlines() if ' - ' in line)
 assert packages['edgenode'] == '0.3.80-r1'
 for package in ('tcpdump-mini', 'luci-base', 'luci-app-edgenode', 'firewall4', 'busybox'):
@@ -22,12 +27,21 @@ for package in ('tcpdump-mini', 'luci-base', 'luci-app-edgenode', 'firewall4', '
 checksums = dict((line.split()[-1].lstrip('*'), line.split()[0])
                  for line in (output / 'sha256sums').read_text().splitlines())
 results = []
-for profile in ('tastek_it692', 'tastek_it694'):
-    image = output / f'immortalwrt-ramips-mt76x8-{profile}-squashfs-sysupgrade.bin'
+for profile in (('ebyte_ecm30',) if ecm30 else ('tastek_it692', 'tastek_it694')):
+    image = output / f'{prefix}-{profile}-squashfs-sysupgrade.bin'
     data = image.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     assert checksums[image.name] == digest
-    assert len(data) <= 7872 * 1024 + 65536, 'image exceeds device partition budget'
+    image_size = len(data)
+    if ecm30:
+        with tarfile.open(image) as archive:
+            member = archive.getmember('sysupgrade-ebyte_ecm30/root')
+            assert member.isfile()
+            data = archive.extractfile(member).read()
+            assert archive.extractfile('sysupgrade-ebyte_ecm30/kernel').read(8) == b'ANDROID!'
+        assert len(data) <= 16 * (524288 - 8192), 'ECM30 rootfs exceeds 16-eraseblock UBI capacity'
+    else:
+        assert len(data) <= 7872 * 1024 + 65536, 'image exceeds device partition budget'
     offset = -1
     while True:
         offset = data.find(b'hsqs', offset + 1)
@@ -45,6 +59,10 @@ for profile in ('tastek_it692', 'tastek_it694'):
                     '-d', str(root), str(squashfs)], check=True, stdout=subprocess.DEVNULL)
     binary = root / 'usr/sbin/edgenode'
     assert b'0.3.80' in binary.read_bytes()
+    if ecm30:
+        assert 'dtu-io' in packages and (root / 'usr/sbin/dtu-io').is_file()
+        assert (root / 'etc/init.d/dtu-io').stat().st_mode & 0o111
+        assert (root / 'lib/upgrade/platform.sh').read_bytes() == (checkout / 'target/linux/sunxi/base-files/lib/upgrade/platform.sh').read_bytes()
     for tool in ('telnet', 'telnetd'):
         assert any((root / directory / tool).is_symlink() or (root / directory / tool).is_file()
                    for directory in ('bin', 'usr/bin', 'usr/sbin')), tool
@@ -97,10 +115,15 @@ for profile in ('tastek_it692', 'tastek_it694'):
     assert 'procd_set_param respawn 3600 5 -1' in init
     monitor = monitor_init.split('procd_open_instance monitor', 1)[1].split('procd_close_instance', 1)[0]
     assert 'procd_set_param respawn 3600 5 -1' in monitor
-    result = dict(image=image.name, size=len(data), sha256=digest, rootfs_bytes=used,
+    result = dict(image=image.name, size=image_size, sha256=digest, rootfs_bytes=used,
                   edgenode=packages['edgenode'], elf_count=elf_count, missing_dependencies=missing,
                   private_key_metadata=keys, firewall=policies,
                   edgenode_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
     results.append(result)
+if ecm30:
+    recovery = list(output.glob(prefix + '-ebyte_ecm30-*initramfs*'))
+    assert recovery
+    for image in recovery:
+        assert hashlib.sha256(image.read_bytes()).hexdigest() == checksums[image.name]
 (output / 'verification.json').write_text(json.dumps(results, indent=2) + '\n')
 print(json.dumps(results, indent=2))
