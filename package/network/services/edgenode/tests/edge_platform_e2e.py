@@ -111,6 +111,8 @@ class Connection:
                 assert opcode == 0x82, opcode
                 envelope = decode(data)
                 assert envelope[4] == self.platform.id, "cross-platform envelope"
+                if self.platform.observer:
+                    self.platform.observer(self, envelope)
                 if 20 in envelope:
                     hello = decode(envelope[20])
                     assert hello[3] == b"0.3.80", hello.get(3)
@@ -159,6 +161,8 @@ class Platform:
         self.tls = tls
         self.connections, self.errors = [], []
         self.stopping = False
+        self.available = True
+        self.observer = None
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
@@ -171,6 +175,9 @@ class Platform:
             except OSError:
                 return
             sock.settimeout(120)
+            if not self.available:
+                sock.close()
+                continue
             if self.tls:
                 sock = self.tls.wrap_socket(sock, server_side=True)
             connection = Connection(self, sock, len(self.connections) + 1)
@@ -306,6 +313,10 @@ def main():
 
             wait_for(lambda: a.current and b.current and a.current.ready and b.current.ready,
                      "two enrolled platforms", check=healthy)
+            if "--acquisition" in sys.argv[3:]:
+                from edge_platform_acquisition_e2e import run_acquisition
+                run_acquisition(platforms, daemon, report, healthy)
+                return
             stable = b.current
             a.current.open_terminal()
             stable.open_terminal()
