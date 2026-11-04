@@ -93,7 +93,10 @@ for profile in ('tastek_it692', 'tastek_it694'):
             assert target_exists(root / interpreter.lstrip('/')), interpreter
     assert not missing, missing
     init = (root / 'etc/init.d/edgenode').read_text()
-    assert init.count('respawn') >= 2
+    monitor_init = (root / 'etc/init.d/4ginfo').read_text()
+    assert 'procd_set_param respawn 3600 5 -1' in init
+    monitor = monitor_init.split('procd_open_instance monitor', 1)[1].split('procd_close_instance', 1)[0]
+    assert 'procd_set_param respawn 3600 5 -1' in monitor
     result = dict(image=image.name, size=len(data), sha256=digest, rootfs_bytes=used,
                   edgenode=packages['edgenode'], elf_count=elf_count, missing_dependencies=missing,
                   private_key_metadata=keys, firewall=policies,

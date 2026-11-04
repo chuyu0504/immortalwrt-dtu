@@ -232,6 +232,7 @@ def main():
     mounted = []
     platforms = []
     daemon = None
+    logger = None
     report = {"cases": [], "binary_sha256": __import__("hashlib").sha256(
         (root / "usr/sbin/edgenode").read_bytes()).hexdigest()}
     try:
@@ -251,6 +252,32 @@ def main():
         if ptmx.is_symlink() or ptmx.exists():
             ptmx.unlink()
         ptmx.symlink_to("pts/ptmx")
+        # A flashed router creates this file during board first-boot setup.
+        # The disposable chroot has only loopback and must not use host networking.
+        (root / "etc/config/network").write_text(
+            "config interface 'loopback'\n option device 'lo'\n option proto 'static'\n"
+            " option ipaddr '127.0.0.1'\n option netmask '255.0.0.0'\n")
+        logger = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        logger.settimeout(0.2)
+        log_socket = root / "dev/log"
+        if log_socket.exists():
+            log_socket.unlink()
+        original_cwd = Path.cwd()
+        os.chdir(root / "dev")
+        logger.bind("log")  # Avoid sockaddr_un's limit on a long artifact directory.
+        os.chdir(original_cwd)
+
+        def capture_syslog():
+            with (output / "syslog.log").open("ab") as stream:
+                while True:
+                    try:
+                        stream.write(logger.recv(8192) + b"\n")
+                        stream.flush()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        return
+        threading.Thread(target=capture_syslog, daemon=True).start()
         cert, key = output / "test-ca.pem", output / "test-ca.key"
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
                         "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1",
@@ -336,6 +363,8 @@ def main():
                 daemon.wait()
         for platform in platforms:
             platform.stop()
+        if logger:
+            logger.close()
         for path in reversed(mounted):
             subprocess.run(["umount", str(path)], check=True)
         (output / "e2e.json").write_text(json.dumps(report, indent=2) + "\n")
