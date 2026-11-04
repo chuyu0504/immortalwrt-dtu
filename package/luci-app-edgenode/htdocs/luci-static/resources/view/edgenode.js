@@ -119,6 +119,8 @@ function serviceInstance(instance, label) {
 }
 
 function pointLocation(point) {
+	if (point.kind === 'external-io')
+		return (point.ioKind || '外部 IO') + ' · ' + (point.channel || '—');
 	if (point.kind === 'modbus')
 		return (point.registerType || '') + ' · 地址 ' + Number(point.address || 0) +
 			' · 数量 ' + Number(point.quantity || 0);
@@ -150,10 +152,11 @@ function showPlatformDetails(platform) {
 		renderTable(
 			[ '名称 / ID', '协议', '连接方式', '串口或网络参数', '状态' ],
 			endpoints.map(function(endpoint) {
-				var connection = endpoint.transport === 'serial'
+				var externalIo = endpoint.transport === 'external-io';
+				var connection = externalIo ? '节点本地 IO' : endpoint.transport === 'serial'
 					? endpoint.channel || '—'
 					: (endpoint.ip || '—') + ':' + Number(endpoint.port || 0);
-				var parameters = endpoint.transport === 'serial'
+				var parameters = externalIo ? '无需 IP、端口或串口' : endpoint.transport === 'serial'
 					? Number(endpoint.baudRate || 0) + ' / ' +
 						Number(endpoint.dataBits || 0) + endpoint.parity + ' / ' +
 						Number(endpoint.stopBits || 0) + ' · ' +
@@ -162,7 +165,7 @@ function showPlatformDetails(platform) {
 						(endpoint.interface ? ' · ' + endpoint.interface : '');
 				return [
 					[ E('strong', [ endpoint.name || '未命名端点' ]), E('br'), E('code', [ endpoint.id || '—' ]) ],
-					endpoint.protocol || '—',
+					endpoint.protocol === 'External IO' ? '独立外部 IO' : endpoint.protocol || '—',
 					connection,
 					parameters,
 					endpoint.enabled ? badge('启用', 'good') : badge('停用', 'warn')
@@ -176,11 +179,13 @@ function showPlatformDetails(platform) {
 			devices.map(function(device) {
 				var protocol = device.protocol === 'Modbus'
 					? 'Slave ' + Number(device.slaveId || 0) + ' · ' + (device.modbusMode || 'RTU')
-					: 'Rack ' + Number(device.rack || 0) + ' / Slot ' + Number(device.slot || 0);
+					: device.protocol === 'S7'
+						? 'Rack ' + Number(device.rack || 0) + ' / Slot ' + Number(device.slot || 0)
+						: device.protocol === 'External IO' ? '节点 IO 方案' : '—';
 				return [
 					[ E('strong', [ device.name || device.code || '未命名设备' ]),
 						E('br'), E('code', [ device.code || device.id || '—' ]) ],
-					device.protocol || '—',
+					device.protocol === 'External IO' ? '独立外部 IO' : device.protocol || '—',
 					Number(device.ioIntervalMs || 1000) + ' ms',
 					Number(device.reportIntervalSec || 0) + ' 秒',
 					Number(device.fastReadDurationSec || 0) + ' 秒 / ' +
@@ -199,6 +204,7 @@ function showPlatformDetails(platform) {
 						E('br'), E('code', [ point.elementId || '—' ]) ],
 					pointLocation(point),
 					point.dataType || '—',
+					point.kind === 'external-io' ? (point.unit || '—') :
 					'× ' + Number(point.scale == null ? 1 : point.scale) +
 						' · ' + Number(point.decimals || 0) + ' 位小数' +
 						(point.unit ? ' · ' + point.unit : ''),

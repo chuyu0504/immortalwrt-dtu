@@ -146,6 +146,50 @@ int main(void) {
     require(strstr(json, "production \\\"one\\\"") != NULL,
             "JSON string escaping changed");
 
+    items[0].item.endpoint.protocol = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+    items[0].item.endpoint.transport = iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO;
+    items[1].item.device.protocol = iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO;
+    memset(&items[2], 0, sizeof(items[2]));
+    items[2].which_item = iot_edge_v1_ConfigItem_external_io_tag;
+    iot_edge_v1_ExternalIoPointConfig *io = &items[2].item.external_io;
+    memcpy(&io->device_id, &items[1].item.device.device_id, sizeof(io->device_id));
+    set_id(&io->model_id, sizeof(io->model_id.bytes), 65U);
+    strcpy(io->point_id, "local-point");
+    strcpy(io->name, "Local \"IO\"");
+    const iot_edge_v1_ExternalIoKind kinds[] = {
+        iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DI,
+        iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO,
+        iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI,
+    };
+    const char *channels[] = { "di0", "do0", "ai0" };
+    for (size_t index = 0; index < 3; ++index) {
+        io->kind = kinds[index];
+        strcpy(io->channel, channels[index]);
+        strcpy(io->unit, index == 2 ? "mA" : "");
+        io->hidden = index == 2;
+        output = tmpfile();
+        require(output != NULL, "cannot create external IO status file");
+        require(edge_status_render(output, &snapshot), "external IO rendering failed");
+        rewind(output);
+        json[fread(json, 1U, sizeof(json) - 1U, output)] = '\0';
+        fclose(output);
+        require(strstr(json, "\"protocol\":\"External IO\"") != NULL, "external IO protocol missing");
+        require(strstr(json, "\"transport\":\"external-io\"") != NULL, "external IO transport missing");
+        require(strstr(json, "\"ip\":") == NULL && strstr(json, "\"port\":") == NULL,
+                "external IO must not advertise network parameters");
+        require(strstr(json, "\"kind\":\"external-io\"") != NULL &&
+                strstr(json, "\"kind\":\"sl651\"") == NULL, "external IO misclassified");
+        require(strstr(json, "\"elementId\":\"local-point\"") != NULL &&
+                strstr(json, channels[index]) != NULL, "external IO identity missing");
+        require(strstr(json, index == 1 ? "\"writable\":true" : "\"writable\":false") != NULL,
+                "external IO permissions incorrect");
+        require(strstr(json, index == 2 ? "\"dataType\":\"DOUBLE\"" : "\"dataType\":\"BOOL\"") != NULL,
+                "external IO value type incorrect");
+        if (index == 2)
+            require(strstr(json, "\"unit\":\"mA\"") != NULL && strstr(json, "\"hidden\":true") != NULL,
+                    "analog IO metadata missing");
+    }
+
     puts("edge status tests passed");
     return EXIT_SUCCESS;
 }

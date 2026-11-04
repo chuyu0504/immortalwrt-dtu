@@ -104,6 +104,8 @@ static const char *protocol_name(iot_edge_v1_Protocol value) {
         return "S7";
     case iot_edge_v1_Protocol_PROTOCOL_SL651:
         return "SL651";
+    case iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO:
+        return "External IO";
     default:
         return "Unknown";
     }
@@ -115,6 +117,8 @@ static const char *transport_name(iot_edge_v1_Transport value) {
         return "serial";
     case iot_edge_v1_Transport_TRANSPORT_ETHERNET:
         return "ethernet";
+    case iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO:
+        return "external-io";
     default:
         return "unknown";
     }
@@ -178,8 +182,9 @@ static bool write_endpoint(FILE *output,
             !write_string_field(output, "parity", endpoint->serial.parity, true) ||
             !write_bool_field(output, "rs485", endpoint->serial.rs485, true))
             return false;
-    } else if (!write_string_field(output, "ip", endpoint->ip, true) ||
-               !write_uint_field(output, "port", endpoint->port, true)) {
+    } else if (endpoint->transport != iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO &&
+               (!write_string_field(output, "ip", endpoint->ip, true) ||
+                !write_uint_field(output, "port", endpoint->port, true))) {
         return false;
     }
     return fputc('}', output) != EOF;
@@ -257,6 +262,25 @@ static bool write_point(FILE *output, const iot_edge_v1_ConfigItem *item) {
             fprintf(output, ",\"scale\":%.17g,\"decimals\":%" PRId32,
                     point->scale, point->decimals) < 0 ||
             !write_bool_field(output, "writable", point->writable, true))
+            return false;
+    } else if (item->which_item == iot_edge_v1_ConfigItem_external_io_tag) {
+        const iot_edge_v1_ExternalIoPointConfig *point = &item->item.external_io;
+        const char *kind = point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DI ? "DI" :
+                           point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO ? "DO" :
+                           point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI ? "AI" : "Unknown";
+        if (!write_string_field(output, "kind", "external-io", false) ||
+            !write_uuid_field(output, "deviceId", &point->device_id, true) ||
+            !write_uuid_field(output, "modelId", &point->model_id, true) ||
+            !write_string_field(output, "elementId", point->point_id, true) ||
+            !write_string_field(output, "name", point->name, true) ||
+            !write_string_field(output, "unit", point->unit, true) ||
+            !write_string_field(output, "channel", point->channel, true) ||
+            !write_string_field(output, "ioKind", kind, true) ||
+            !write_string_field(output, "dataType",
+                point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_AI ? "DOUBLE" : "BOOL", true) ||
+            !write_bool_field(output, "hidden", point->hidden, true) ||
+            !write_bool_field(output, "writable",
+                point->kind == iot_edge_v1_ExternalIoKind_EXTERNAL_IO_DO, true))
             return false;
     } else {
         if (!write_string_field(output, "kind", "sl651", false))
