@@ -2276,8 +2276,19 @@ static void verify_external_io_independent_of_protocol(bool standalone) {
     edge_acquisition *acquisition = edge_acquisition_create(external_io_telemetry, command, NULL);
     assert(acquisition);
     char error[256] = {0};
+    if (standalone) source.external_io = false;
     assert(edge_acquisition_apply_multi(acquisition, &source, 1U, monotonic_ms(), error, sizeof(error)));
     assert(edge_acquisition_start(acquisition, error, sizeof(error)));
+    if (standalone) {
+        const uint64_t quiet_until = monotonic_ms() + 300U;
+        while (monotonic_ms() < quiet_until) {
+            struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};
+            (void)poll(&event, 1U, 20);
+            edge_acquisition_tick(acquisition, monotonic_ms());
+        }
+        assert(external_io_reports == 0U);
+        assert(edge_acquisition_set_external_io(acquisition, platform_id, true));
+    }
     const uint64_t deadline = monotonic_ms() + 5000U;
     while (external_io_reports < 1U && monotonic_ms() < deadline) {
         struct pollfd event = {.fd = edge_acquisition_event_fd(acquisition), .events = POLLIN};

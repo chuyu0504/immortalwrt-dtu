@@ -3563,8 +3563,10 @@ bool edge_acquisition_apply_multi(edge_acquisition *acquisition,
                     return false;
                 }
             if (device->protocol == iot_edge_v1_Protocol_PROTOCOL_EXTERNAL_IO) {
+                /* Cached configurations load before platform negotiation. IO
+                 * remains gated by external_io_enabled until the HelloAck. */
                 if (endpoint->transport != iot_edge_v1_Transport_TRANSPORT_EXTERNAL_IO ||
-                    !source->external_io || !runtime->external_io_count || runtime->point_count) {
+                    !runtime->external_io_count || runtime->point_count) {
                     free_devices(devices, output + 1U); free_links(links, link_count);
                     set_error(error, error_size, "invalid standalone external IO device");
                     return false;
