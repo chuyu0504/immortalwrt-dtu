@@ -46,8 +46,8 @@ def run(args, label, timeout=14400):
 
 try:
     assert git('status', '--porcelain', '--untracked-files=all') == '', 'checkout is not clean'
-    assert git('branch', '--show-current') == 'codex/immortalwrt-25.12.2'
-    run(['git', 'pull', '--ff-only', 'origin', 'codex/immortalwrt-25.12.2'], 'pull', 300)
+    assert git('branch', '--show-current') == 'main'
+    run(['git', 'pull', '--ff-only', 'origin', 'main'], 'pull', 300)
     assert git('rev-parse', 'HEAD') == commit
     assert git('status', '--porcelain', '--untracked-files=all') == ''
     old_config = (checkout / '.config').read_text() if (checkout / '.config').exists() else ''
