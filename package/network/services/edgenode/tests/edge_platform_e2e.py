@@ -115,7 +115,7 @@ class Connection:
                     self.platform.observer(self, envelope)
                 if 20 in envelope:
                     hello = decode(envelope[20])
-                    assert hello[3] == b"0.3.80", hello.get(3)
+                    assert hello[3] == b"0.3.81", hello.get(3)
                     self.send(21, field(1, self.node) + field(2, self.epoch) +
                               field(3, 6) + field(4, 1) + field(5, 16384))
                     self.ready = True
