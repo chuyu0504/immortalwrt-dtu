@@ -81,7 +81,7 @@ sole source location for the OpenWrt node implementation and its node-side tests
   首次 Hello 握手仍有截止时间；未声明新能力的旧固件保留服务端原有保活时序。
 - 连续失败指数退避至 300 秒（若配置初始间隔更长则保留），稳定通信 300 秒后复位。
   待审批响应结束初始握手等待，后续按五分钟心跳等待原连接获批。
-- WG `persistent_keepalive` 为 120 秒，重新应用 VPN 配置后生效；移动 NAT 的空闲入站
+- WG `persistent_keepalive` 为 30 秒，重新应用 VPN 配置后生效；移动 NAT 的空闲入站
   可达性需要现场验证。采样、原始报文、单记录 ACK 和必要失败重传保持不变。
 
 ## VPN 按需启用及平台隔离（0.3.65）

@@ -513,7 +513,7 @@ bool edge_vpn_apply(edge_vpn_session *session, const iot_edge_v1_VpnConfigReques
     char peer_link[16]; safe_copy(peer_link, sizeof(peer_link), session->plan.host_link); peer_link[strlen(peer_link) - 1U] = 'p';
     const char *const namespace_add[] = {"ip", "netns", "add", session->plan.namespace_name, NULL};
     const char *const wg_add[] = {"ip", "link", "add", session->plan.transport_link, "type", "wireguard", NULL};
-    const char *const wg_set[] = {"wg", "set", session->plan.transport_link, "private-key", secret, "peer", request->hub_public_key, "endpoint", endpoint, "allowed-ips", "100.96.0.0/11,172.16.0.0/12", "persistent-keepalive", "120", NULL};
+    const char *const wg_set[] = {"wg", "set", session->plan.transport_link, "private-key", secret, "peer", request->hub_public_key, "endpoint", endpoint, "allowed-ips", "100.96.0.0/11,172.16.0.0/12", "persistent-keepalive", "30", NULL};
     const char *const wg_move[] = {"ip", "link", "set", session->plan.transport_link, "netns", session->plan.namespace_name, NULL};
     const char *const wg_rename[] = {"ip", "link", "set", session->plan.transport_link, "name", "wg", NULL};
     const char *const links[] = {"ip", "link", "add", session->plan.host_link, "type", "veth", "peer", "name", peer_link, NULL};
@@ -533,7 +533,7 @@ bool edge_vpn_apply(edge_vpn_session *session, const iot_edge_v1_VpnConfigReques
     // Incoming WG packets always use the LAN transit table after translation.
     const char *const lan_route[] = {"ip", "route", "add", "table", "200", "default", "via", session->plan.host_ip, "dev", "uplink", NULL};
     const char *const lan_rule[] = {"ip", "rule", "add", "priority", "100", "iif", "wg", "lookup", "200", NULL};
-    const char *const forwarding[] = {"sysctl", "-q", "-w", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=0", "net.ipv4.conf.uplink.rp_filter=0", "net.ipv4.conf.wg.rp_filter=0", NULL};
+    const char *const forwarding[] = {"sysctl", "-q", "-w", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=0", "net.ipv4.conf.uplink.rp_filter=0", "net.ipv4.conf.wg.rp_filter=0", "net.ipv4.tcp_mtu_probing=1", NULL};
     const char *const nft[] = {"nft", "-f", session->plan.rules_path, NULL};
     success = success && run(namespace_add) == 0 && run(wg_add) == 0 && run(wg_set) == 0;
     unlink(secret);
